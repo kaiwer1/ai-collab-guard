@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "note": "登记表模板：复制为 registry.json 后按本机实际路径填写。agents = 各家记忆/指令文件（只报存在性/字节/行数，不做内容指纹）；caliber = 口径文件（合并指纹只算这些）。cap 单位为字节，未知留空。selfRef: true = 词库/自指保护文件（任何内容变更即 P0，diff 整体脱敏不回显；其跳过敏感扫描、事件 secrets 为空，消费侧按 kind 判定）。注意：同一文件不要登记两条 caliber（dedupKey 用裸路径串，两条目会共享去重键）。",
+  "note": "登记表模板：复制为 registry.json 后按本机实际路径填写。agents = 各家记忆/指令文件（只报存在性/字节/行数，不做内容指纹）；caliber = 口径文件（合并指纹只算这些）。cap 单位为字节，未知留空。selfRef: true = 词库/自指保护文件（任何内容变更即 P0，diff 整体脱敏不回显；其跳过敏感扫描、事件 secrets 为空，消费侧按 kind 判定）。注意：同一文件不要登记两条 caliber（dedupKey 用裸路径串，两条目会共享去重键）。agents 里 memory 为空数组 = 该实例无单文件长期记忆（如豆包：会话历史按会话 ID 分片、非单文件）——如实留空，不编造路径硬登记。",
   "agents": [
     { "id": "agent-a", "name": "AI 甲", "memory": ["<绝对路径>/AGENTS.md"] },
     { "id": "agent-b", "name": "AI 乙", "memory": ["<绝对路径>/MEMORY.md"], "cap": 65536 }

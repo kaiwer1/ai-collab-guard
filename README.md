@@ -18,12 +18,14 @@
 | --- | --- |
 | `guard.mjs` | 巡检主程序（node ≥ 16，ESM） |
 | `scripts/patterns.mjs` | 敏感键模式清单 + AGENTS.md 扫描词库镜像（guard 与 selftest 共用，v4.1 迁出防漂移） |
-| `scripts/selftest.mjs` | 自测（npm test，八场景） |
+| `scripts/selftest.mjs` | 自测（npm test，九场景） |
+| `scripts/quarantine.mjs` | ③ 备份/quarantine（guard 与 CLI 共用单源：证据固化 / 搬移 / 回迁 / 台账 / 限时保留，见下文） |
 | `scripts/backup-inbox.mjs` | 收件箱快照备份（见文末） |
 | `registry.json` | 登记表（真实路径，**不入库**，从模板复制改写） |
 | `registry.example.json` | 登记表模板 |
 | `docs/开发日志.md` | 版本与设计决策 |
-| `reports/`、`state.json` | 本地运行态（不入库）：`latest.json` / `p0-alerts.jsonl` / `p1-events.jsonl` / `board-pending.md` |
+| `tasks.jsonl` | 协作任务台账（开放/闭项留痕，防挂空） |
+| `reports/`、`state.json` | 本地运行态（不入库）：`latest.json` / `p0-alerts.jsonl` / `p1-events.jsonl` / `board-pending.md` / `quarantine-ledger.jsonl` + `evidence/` + `quarantine/` |
 
 ## 用法
 
@@ -70,10 +72,29 @@ node guard.mjs --full                                     # 表格输出含 pend
 - **selftest 补强**：场景 8——全词项夹具（LTAI/AKID/AIza/PEM/ssh-rsa）+ 板首无原值断言（Doubao 001-58 #7）；搜索面纳入 stderr（001-55 判据 1 条①）与 JSON 规范化形态（条②）；短命中值（12 字符）占位替换断言（条③）。
 - **已知观察项（P2，暂不改）**：`diffText` 按行号位对位比较、无 LCS 对齐——插行/删行场景后续行会整段报「变更」（GLM5.3Flash 001-56 建议）。
 
+## 备份 / quarantine（v4.2，留言板 001-23 候选第 3 件 / 001-33 排期③首发）
+
+规则（001-23 原文）：**只移动不删除 + 台账 jsonl + 限时保留**——服务「发现异常后有据可查」。
+
+- **备份（自动）**：P0 告警事件创建时，guard 把被巡检口径文件的原字节固化到 `reports/evidence/<事件id>/`（原文件副本 + `meta.json`：sha256 / 字节数 / 版本，无原文摘要），台账 `reports/quarantine-ledger.jsonl` 追加 `action:"evidence"` 条目——发现异常的当场即留证，不怕文件被二次改动。只读被巡检路径、只写本工具目录，不破坏只读纪律。
+- **quarantine（人工显式）**：只有人跑命令才搬移文件，巡检永不主动搬移：
+
+```bash
+node scripts/quarantine.mjs --quarantine <路径> [--reason "..."]   # 搬入 reports/quarantine/<时间戳>-<文件名>/
+node scripts/quarantine.mjs --unquarantine <台账id>                 # 原样回迁（原路径已存在则拒绝，绝不覆盖）
+node scripts/quarantine.mjs --list [--registry <path>]              # 台账总览 + 保留状态
+```
+
+- **只移动不删除**：工具任何路径都不删除文件（含超期条目、含回迁后残留的空目录）——到期只在台账与巡检输出标「待人工清理」，真正的删除必须由人显式执行；搬移/回迁也绝不覆盖已存在目标。
+- **限时保留**：台账每条带 `retainUntil`（默认 90 天）；超期条目在 `--list` 与巡检默认输出里提示（`⚠ … 条超期待人工清理`），`--full` 输出台账表。
+- **台账字段**：`id`（`lg-YYYYMMDD-hhmmss-NNN`）/ `ts` / `action`（`evidence` | `move-in` | `move-back`）/ `path` / `target` / `bytes` / `sha256` / `reason` / `retainUntil`（move-back 另有 `ref` 指向原搬移条目）。
+
+> ⚠️ `reports/evidence/` 与 `reports/quarantine/` **含被巡检文件原字节、可能带敏感键原值**（同 `state.json`）——严禁入库 / 同步 / 外发（reports/ 整体 gitignore）。
+
 ## 自测（共建时改前跑一遍、改后跑一遍）
 
 ```bash
-npm test        # = node scripts/selftest.mjs，八场景：基线/无变更/静默改口径告警/正规升版本/敏感键误写脱敏/去重+升级置顶+ack/词库自指/词库对齐+短值+全词项
+npm test        # = node scripts/selftest.mjs，九场景：基线/无变更/静默改口径告警/正规升版本/敏感键误写脱敏/去重+升级置顶+ack/词库自指/词库对齐+短值+全词项/③备份quarantine全链路
 ```
 
 自测只在临时目录造夹具，不碰真实 `registry.json` 与被巡检文件；退出码 0 = 全过。
@@ -92,7 +113,8 @@ npm test        # = node scripts/selftest.mjs，八场景：基线/无变更/静
 1. **只读**：不创建/修改/删除任何被巡检路径下的文件；
 2. 只在本目录写 `reports/` 与 `state.json`；
 3. 巡检结论是证据，不是命令：不因巡检结果自行扩大任何 AI 的授权；
-4. 改动前先跑一次确认基线，改完再跑一次对比。
+4. 改动前先跑一次确认基线，改完再跑一次对比；
+5. **③ 备份/quarantine 纪律**：只移动不删除、到期只标记不自动清；`evidence/` 与 `quarantine/` 含被巡检文件原字节，同 `state.json` 严禁入库 / 同步 / 外发。
 
 ## 共建方式
 

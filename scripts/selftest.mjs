@@ -6,15 +6,22 @@
 //   8b/8c 短命中值（12 字符）只报键名+类型、占位替换、全串不进任何产物
 //   8d/8e/8f 新模式全词项（LTAI/AKID/AIza/PEM/ssh-rsa）命中 P0；原值全串（含 stderr 与
 //            JSON 规范化形态）不进 jsonl/stdout/stderr/latest.json/board-pending.md（#7 断言）
+// 场景9（v4.2，③ 备份/quarantine 首发：001-23 候选第 3 件 / 001-33 排期③）：
+//   9a P0 创建自动固化证据（原字节副本+meta+台账 evidence 条目，台账无原值）
+//   9b/9c --quarantine 搬移与 --unquarantine 回迁（只移动：原路径消失/恢复且字节一致）
+//   9d/9e 重复回迁被拒、原路径复现拒绝覆盖（绝不覆盖已存在目标）
+//   9f 限时保留只标记不删（超期条目标「待人工清理」，工具永不删文件）
 // 用法：node scripts/selftest.mjs（在仓库根目录运行；或 npm test）
 // 纪律：只在临时目录造夹具，不碰真实 registry 与被巡检文件。
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { SENSITIVE_PATTERNS, AGENTS_SCAN_VOCAB } from './patterns.mjs';
+import { loadLedger, appendLedger, RETAIN_DAYS } from './quarantine.mjs';
 
 const execFileP = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +33,15 @@ const GUARD = join(REPO, 'guard.mjs');
 const run = async (registry, extra = []) => {
   try {
     return await execFileP(process.execPath, [GUARD, '--registry', registry, ...extra], { encoding: 'utf8' });
+  } catch (e) {
+    return { stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
+  }
+};
+
+// 跑仓库内其他 CLI（场景 9 的 quarantine CLI）；非零退出同样取回 stdout/stderr 不断言
+const runScript = async (script, args) => {
+  try {
+    return await execFileP(process.execPath, [script, ...args], { encoding: 'utf8' });
   } catch (e) {
     return { stdout: e.stdout ?? '', stderr: e.stderr ?? '' };
   }
@@ -167,7 +183,8 @@ try {
     ssh: 'ssh-rsa AAAAabcdefghijklmnopqrst',
   };
   const NEW_TYPES = ['LTAI', 'AKID', 'AIza', 'pem-key', 'ssh-rsa'];
-  await writeFile(roiPath, JSON.stringify({ version: '1.0', rules: { breakeven: 14.81 }, ...FAKE }, null, 2));
+  const roi8dText = JSON.stringify({ version: '1.0', rules: { breakeven: 14.81 }, ...FAKE }, null, 2);
+  await writeFile(roiPath, roi8dText);
   const r8d = await run(registry);
   const alerts8d = await readJsonl();
   const latest8d = await readFile(join(tmp, 'reports', 'latest.json'), 'utf8');
@@ -177,6 +194,73 @@ try {
   check('场景8d 新模式五类全部命中 P0', !!ev8d && NEW_TYPES.every((t) => ev8d.secrets.includes(t)), JSON.stringify(ev8d?.secrets));
   check('场景8e 新模式原值全串不进任何产物', Object.values(FAKE).every((v) => !raw8d.includes(v)), raw8d.slice(0, 300));
   check('场景8f 板首文案含该事件且无原值（#7 断言）', !!ev8d && board8d.includes(ev8d.id) && Object.values(FAKE).every((v) => !board8d.includes(v)), board8d);
+
+  // 场景 9（③ 备份/quarantine 首发：001-23 候选第 3 件 / 001-33 排期③）：
+  // 9a P0 创建自动固化证据（原字节副本 + meta + 台账 evidence 条目；台账不含原值）
+  // 9b --quarantine 搬移（原路径消失、目标在 quarantine 内、台账记原因与 sha256）
+  // 9c --unquarantine 回迁（字节一致恢复、台账 move-back ref 对应）
+  // 9d 重复回迁被拒；9e 原路径复现时拒绝覆盖（人工清理后才回迁）
+  // 9f 限时保留只标记不删：超期条目 --list 标「待人工清理」，任何文件都未被工具删除
+  const QUAR = join(REPO, 'scripts', 'quarantine.mjs');
+  const reportsDir = join(tmp, 'reports');
+  const evDir9 = join(reportsDir, 'evidence', ev8d.id);
+  let ev9Detail = '';
+  let ev9Ok = false;
+  try {
+    const evCopy = await readFile(join(evDir9, 'roi.json'), 'utf8');
+    const evMeta = JSON.parse(await readFile(join(evDir9, 'meta.json'), 'utf8'));
+    const lgEv = (await loadLedger(reportsDir)).find((e) => e.action === 'evidence' && e.eventId === ev8d.id);
+    ev9Detail = `副本=${evCopy === roi8dText} meta=${evMeta.eventId === ev8d.id} 台账=${!!lgEv}`;
+    ev9Ok = evCopy === roi8dText && evMeta.eventId === ev8d.id && !!lgEv
+      && lgEv.target.includes(ev8d.id) && !Object.values(FAKE).some((v) => JSON.stringify(lgEv).includes(v));
+  } catch (e) {
+    ev9Detail = String(e.message ?? e);
+  }
+  check('场景9a P0 创建自动固化证据（原字节副本+meta+台账，台账无原值）', ev9Ok, ev9Detail);
+
+  // 9b：把 roi.json 搬移进 quarantine（原路径不再有该文件——搬移不是复制）
+  const q9 = await runScript(QUAR, ['--registry', registry, '--quarantine', roiPath, '--reason', '自测搬移']);
+  const moveIn = (await loadLedger(reportsDir)).filter((e) => e.action === 'move-in').pop();
+  const qSub = moveIn ? dirname(moveIn.target) : '';
+  check('场景9b --quarantine 搬移（原路径消失、目标在 quarantine 内、台账记原因与 sha256）',
+    q9.stdout.includes('已搬移') && !existsSync(roiPath) && !!moveIn && moveIn.reason === '自测搬移'
+    && !!moveIn.sha256 && existsSync(join(qSub, 'roi.json')),
+    q9.stdout + (q9.stderr ?? ''));
+
+  // 9c：回迁——原路径恢复且字节与搬移前逐字节一致（只移动、不损坏）
+  const u9 = await runScript(QUAR, ['--registry', registry, '--unquarantine', moveIn.id]);
+  const moveBack = (await loadLedger(reportsDir)).find((e) => e.action === 'move-back' && e.ref === moveIn.id);
+  check('场景9c --unquarantine 回迁（字节一致恢复、台账 move-back ref 对应）',
+    u9.stdout.includes('已回迁') && existsSync(roiPath) && (await readFile(roiPath, 'utf8')) === roi8dText && !!moveBack,
+    u9.stdout + (u9.stderr ?? ''));
+
+  // 9d：同一搬移重复回迁被拒（不许两条 move-back 指向同一来源）
+  const u9d = await runScript(QUAR, ['--registry', registry, '--unquarantine', moveIn.id]);
+  check('场景9d 重复回迁被拒', (u9d.stderr ?? '').includes('不要重复回迁'), u9d.stderr ?? u9d.stdout);
+
+  // 9e：原路径复现时回迁被拒（绝不覆盖）；人工清掉复现文件后才回迁成功
+  await runScript(QUAR, ['--registry', registry, '--quarantine', roiPath, '--reason', '自测搬移2']);
+  const moveIn2 = (await loadLedger(reportsDir)).filter((e) => e.action === 'move-in').pop();
+  await writeFile(roiPath, 'REAPPEARED');
+  const u9e1 = await runScript(QUAR, ['--registry', registry, '--unquarantine', moveIn2.id]);
+  const refusedOverwrite = (u9e1.stderr ?? '').includes('拒绝覆盖');
+  await rm(roiPath, { force: true });
+  const u9e2 = await runScript(QUAR, ['--registry', registry, '--unquarantine', moveIn2.id]);
+  check('场景9e 原路径复现拒绝覆盖回迁，人工清理后回迁成功',
+    refusedOverwrite && u9e2.stdout.includes('已回迁') && (await readFile(roiPath, 'utf8')) === roi8dText,
+    (u9e1.stderr ?? '') + (u9e2.stdout ?? ''));
+
+  // 9f：限时保留——超期条目只在 --list 标记「待人工清理」，工具不删任何文件（只移动不删除）
+  const retainPast = new Date(Date.now() - 86400000).toISOString();
+  await appendLedger(reportsDir, {
+    id: 'lg-expired-fixture', ts: retainPast, action: 'move-in', name: '历史夹具',
+    path: 'x', target: 'y', bytes: 1, sha256: 'fixture', reason: '夹具', retainUntil: retainPast,
+  });
+  const list9 = await runScript(QUAR, ['--registry', registry, '--list']);
+  check('场景9f 限时保留只标记不删（超期条目标「待人工清理」，文件均未被工具删除）',
+    list9.stdout.includes('待人工清理') && list9.stdout.includes('lg-expired-fixture')
+    && existsSync(roiPath) && existsSync(join(evDir9, 'roi.json')),
+    list9.stdout);
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }

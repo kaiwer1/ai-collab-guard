@@ -23,6 +23,10 @@
 //      candidate——一次性静默改动产生的 pending 没人回执也按 001-33 第 8 条置顶（原实现下永不置顶）。
 //   ③ 消费提示（001-55 第四节）：selfRef 词库文件跳过敏感扫描（secrets 为空），但自指变更独立走
 //      P0——消费侧按 kind 判定，不要按 secrets 非空筛选/路由。
+// ③（2026-10-18 · workbuddy-step-5-preview，按 001-23 候选工作项第 3 件 / 001-33 排期③首发）：
+//   备份/quarantine（scripts/quarantine.mjs，guard 与 CLI 共用单源）——只移动不删除 + 台账 jsonl + 限时保留。
+//   P0 事件创建即把被巡检文件原字节固化到 reports/evidence/<事件id>/（只读被巡检路径，只写本工具目录，
+//   不破坏只读纪律）；人工显式 --quarantine/--unquarantine 才搬移文件；台账到期只标「待人工清理」，永不删。
 // 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json；
 //   p0-alerts.jsonl / board-pending.md 只由本工具生成，回执只能通过 --ack/--resolve 进行。
 // 用法：node guard.mjs [--json] [--full] [--registry <path>]
@@ -33,6 +37,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SENSITIVE_PATTERNS } from './scripts/patterns.mjs';
+import { saveEvidence, loadLedger, isExpired, RETAIN_DAYS } from './scripts/quarantine.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -522,6 +527,21 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
   const escN = pending.filter((e) => e.escalated).length;
   await writeFile(BOARD_FILE, renderBoard(pending, ts), 'utf8');
 
+  // ③ 备份：P0 事件创建即固化证据副本（只读被巡检路径，只写本工具目录；单条失败不阻断巡检）
+  for (const ev of created) {
+    const unit = calUnits.find((c) => c.id === ev.caliber);
+    if (!unit || unit.state !== '正常' || !unit.path || !existsSync(unit.path)) continue;
+    try {
+      await saveEvidence(REPORT_DIR, ev, unit.path);
+    } catch (e) {
+      console.error(`证据固化失败（${ev.id}）：${String(e.message ?? e)}`);
+    }
+  }
+
+  // ③ 台账（只移动不删除 + 限时保留）：超期条目只标记、工具永不删——在此提醒人工清理
+  const ledger = await loadLedger(REPORT_DIR);
+  const expiredLedger = ledger.filter((e) => isExpired(e, ts));
+
   // P1 记录级 → p1-events.jsonl（板内记录 + 收件箱心跳，不置顶不通知）
   const p1Count = [];
   if (!firstRun) {
@@ -550,7 +570,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
 
   const report = {
     tool: 'collab-guard',
-    version: '4.1',
+    version: '4.2',
     checkedAt: ts,
     root: registry.root,
     firstRun,
@@ -559,6 +579,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
     caliber: { units: calUnits.map(({ text, ...rest }) => rest), composite: calComp, events },
     alerts: { total: alerts.length, pending: pending.length, escalated: escN, events: pending },
     summary: { warns: warns.length, infos: infos.length, p0pending: pending.length, escalated: escN, p1: p1Count.length },
+    quarantine: { entries: ledger.length, expired: expiredLedger.length, retainDays: RETAIN_DAYS },
   };
 
   // 落盘：完整报告 + 下一轮对比用的 state（只在本工具目录写；state 含口径原文供下轮字段级 diff）
@@ -617,13 +638,29 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
         console.log(`| ${e.id} | ${e.kind} | ${e.name} | ${e.rounds}${e.escalated ? '（置顶）' : ''} | ${e.summary} |`);
       }
     }
+    console.log('');
+    if (ledger.length === 0) {
+      console.log('## 备份/quarantine 台账（无记录）');
+    } else {
+      console.log(`## 备份/quarantine 台账（${ledger.length} 条 · 限时保留 ${RETAIN_DAYS} 天 · 到期只标记、工具永不删${expiredLedger.length > 0 ? ` · ⚠ ${expiredLedger.length} 条超期待人工清理` : ''}）`);
+      console.log('| id | 动作 | 名称 | 字节 | 留截至期 | 状态 |');
+      console.log('|---|---|---|---|---|---|');
+      for (const e of ledger) {
+        const when = e.retainUntil ? new Date(e.retainUntil).toLocaleString('sv-SE') : '-';
+        console.log(`| ${e.id} | ${e.action}${e.ref ? `(${e.ref})` : ''} | ${e.name ?? '-'} | ${e.bytes ?? '-'} | ${when} | ${isExpired(e, ts) ? '待人工清理（已超期）' : '在留'} |`);
+      }
+    }
   } else {
     // 默认输出：干净时一行；有事件时逐条列出（告警明细只在 --full/--json/板首文件，默认不刷屏）
+    const ledgerLine = expiredLedger.length > 0
+      ? `⚠ 备份/quarantine 台账 ${expiredLedger.length} 条超期待人工清理（只移动不删除，工具永不删；node scripts/quarantine.mjs --list）`
+      : '';
     if (warns.length === 0 && infos.length === 0) {
-      console.log(`巡检正常 · ${memLine} · ${compLine} · ${calLine} · 口径无变更${pending.length > 0 ? ` · ${alertLine}` : ''}`);
+      console.log(`巡检正常 · ${memLine} · ${compLine} · ${calLine} · 口径无变更${pending.length > 0 ? ` · ${alertLine}` : ''}${ledgerLine ? `\n${ledgerLine}` : ''}`);
     } else {
       console.log(`巡检 · ${memLine} · ${compLine} · ${calLine}${pending.length > 0 ? `\n${alertLine}` : ''}`);
       for (const e of [...warns, ...infos]) console.log(`${e.level === 'warn' ? '⚠' : '·'} ${e.text}`);
+      if (ledgerLine) console.log(ledgerLine);
     }
   }
 }
