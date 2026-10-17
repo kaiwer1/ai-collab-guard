@@ -1,11 +1,24 @@
-// 同机多 AI 协同 · 只读巡检 v3（collab-guard）
+// 同机多 AI 协同 · 只读巡检 + 告警送达 v4（collab-guard）
 // v1（2026-10-17 · DSH）：各家记忆文件存在性/大小/指纹巡检 + 合并指纹。
 // v2（2026-10-17 · workbuddy-step-5-preview）：新增「口径文件」巡检与变更检测。
 // v3（2026-10-17 · workbuddy-step-5-preview，按留言板 001-21 老板拍板收窄激活）：
 //   记忆文件只报存在性/字节数/行数/缺失/空——**不做内容指纹**（含敏感记忆的 AI 不参与指纹，
 //   不再读取记忆内容算哈希）；合并指纹只对明确同意共享的口径文件计算。
-// 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json。
+// v4（2026-10-17 · workbuddy-step-5-preview，按留言板 001-33 定稿② + 001-34 六判据 + 003-42 脱敏三判据）：
+//   分级：P0=静默改口径（哈希变、version 未升）/ 敏感键误写进口径文件 / 词库自指变更；
+//         P1=口径正规升级（内容与 version 同变）/ 口径内容变更；P2=存量告警（记忆空文件/缺失/未登记，聚合一行）。
+//   送达：P0 → reports/p0-alerts.jsonl（id 稳定 evt-YYYYMMDD-hhmmss-NNN；去重键=路径+内容哈希+version，
+//         同一 key 只首次上板；status pending|acked|resolved；连续≥2轮未处理 escalated 置顶）
+//         + reports/board-pending.md（板首「阻塞项/待老板」区自动文案，diff 摘要两路）；
+//         P1 → reports/p1-events.jsonl；P2 每小时聚合一行。默认**不外发**（001-31），--deliver 保留为人工诊断。
+//   脱敏（003-42 三判据）：敏感命中只报键名+命中类型、不报值；值只留前 2 后 1；len<12 不做无条件子串
+//         匹配（改为断言占位替换）；词库文件（selfRef:true）diff 值整体脱敏（自指保护，改词库=可令告警失效）。
+//   字段级 diff：JSON 递归键路径，格式「键路径 | 旧值 → 新值 | version 旧 → 新」；非 JSON 按行号。
+//   状态机 CLI：--ack <id> --note "..." / --resolve <id> --note "..."（对应板上「已核对·结论」回执后人工执行）。
+// 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json；
+//   p0-alerts.jsonl / board-pending.md 只由本工具生成，回执只能通过 --ack/--resolve 进行。
 // 用法：node guard.mjs [--json] [--full] [--registry <path>]
+//       node guard.mjs --ack <id> --note "..." | --resolve <id> --note "..."
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -21,10 +34,59 @@ const REGISTRY = regIdx >= 0 ? argv[regIdx + 1] : join(HERE, 'registry.json');
 const BASE = dirname(REGISTRY);
 const REPORT_DIR = join(BASE, 'reports');
 const STATE_FILE = join(BASE, 'state.json');
+const ALERTS_FILE = join(REPORT_DIR, 'p0-alerts.jsonl');
+const P1_FILE = join(REPORT_DIR, 'p1-events.jsonl');
+const BOARD_FILE = join(REPORT_DIR, 'board-pending.md');
+const ESCALATE_AFTER = 2; // 同一 P0 连续 ≥2 轮未处理 → 置顶（001-27/001-33 定稿）
+const MAX_DIFF_ITEMS = 5; // 单事件最多列几条 diff
+const MAX_TEXT_BYTES = 65536; // 超过该大小的口径文件不留 prevText（diff 退化为仅指纹对比）
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const sha12 = (buf) => sha(buf).slice(0, 12);
 const now = () => new Date().toISOString();
+
+// ---------- 敏感键检测与脱敏（001-29 规格 + 003-42 三条可断言判据） ----------
+// 只报「命中类型」（键名/模式），从不输出原值；原值仅在本函数内部短暂存在。
+// 边界防误报（2026-10-17 实测教训：开发日志里 "ask-sonner" 被 sk- 误命中）：
+//   ① 词边界 lookbehind（key 前必须是行首/空白/引号/=/标点，不能是字母数字）；
+//   ② 最小长度（真实 key 的字符流通常 ≥16；短前缀如 sk-ws-/sk-sp- 只是类型名不是值）。
+const SENSITIVE_PATTERNS = [
+  { type: 'sk-', re: /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/g },
+  { type: 'ghp_', re: /(?<![A-Za-z0-9_-])ghp_[A-Za-z0-9]{20,}/g },
+  { type: 'github_pat_', re: /(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}/g },
+  { type: 'AKIA', re: /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}/g },
+  { type: 'xox', re: /(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}/g },
+  { type: 'bearer', re: /(?<![A-Za-z])Bearer\s+[A-Za-z0-9._-]{16,}/g },
+  { type: 'api-key', re: /(?:api[_-]?key|apikey)\s*[:=]\s*["']?([^\s"']{12,})/gi },
+  { type: 'token', re: /(?:token|secret|password|passwd|passphrase)\s*[:=]\s*["']?([^\s"']{12,})/gi },
+];
+// 返回去重后的命中类型列表（不返回原值——原值绝不出现在任何产物里）
+function scanSensitiveTypes(text) {
+  const types = new Set();
+  for (const p of SENSITIVE_PATTERNS) {
+    p.re.lastIndex = 0;
+    if (p.re.test(text)) types.add(p.type);
+  }
+  return [...types];
+}
+function isSensitiveValue(v) {
+  const s = String(v);
+  for (const p of SENSITIVE_PATTERNS) {
+    p.re.lastIndex = 0;
+    if (p.re.test(s)) return true;
+  }
+  return false;
+}
+// 值脱敏：只留前 2 后 1；过短整体占位（003-42 判据2：短值不做无条件子串匹配，断言占位替换）
+function maskValue(v) {
+  const s = String(v);
+  if (s.length <= 3) return '(脱敏)';
+  return `${s.slice(0, 2)}…${s.slice(-1)}`;
+}
+function truncValue(v, max = 80) {
+  const s = String(v);
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
 
 // ---------- 记忆巡检（v3 收窄：只报存在性/字节/行数，不做内容指纹） ----------
 async function inspectMemory(agent) {
@@ -66,24 +128,33 @@ function memoryVerdict(units) {
 
 // ---------- 口径巡检（合并指纹只算口径文件——明确同意共享的范围） ----------
 // watch: version = 有版本字段，盯版本变更+静默改动；content = 盯内容变更（记录级）；exists = 只盯存在性
+// selfRef: true = 词库/自指保护文件（001-29/001-30）：任何内容变更即 P0，且 diff 值整体脱敏不回显
 async function inspectCaliber(entry) {
-  if (!existsSync(entry.path)) {
-    return { id: entry.id, name: entry.name, path: entry.path, watch: entry.watch ?? 'content', state: '缺失', bytes: 0, hash: null, version: null, mtime: null };
-  }
+  const base = { id: entry.id, name: entry.name, path: entry.path, watch: entry.watch ?? 'content', selfRef: !!entry.selfRef, state: '缺失', bytes: 0, hash: null, version: null, mtime: null, secretTypes: [], text: null };
+  if (!existsSync(entry.path)) return base;
   const st = statSync(entry.path);
+  if (st.size === 0) return { ...base, state: '空文件' };
   const buf = await readFile(entry.path);
+  const text = buf.toString('utf8');
   let version = null;
   if (entry.versionField && entry.path.toLowerCase().endsWith('.json')) {
     try {
-      version = String(JSON.parse(buf.toString('utf8'))[entry.versionField] ?? null);
+      version = String(JSON.parse(text)[entry.versionField] ?? null);
     } catch {
       version = '(JSON解析失败)';
     }
   }
+  // 敏感键扫描：词库文件自身内容天然含模式名，跳过（selfRef 即敏感扫描豁免）
+  const secretTypes = entry.selfRef ? [] : scanSensitiveTypes(text);
   return {
-    id: entry.id, name: entry.name, path: entry.path, watch: entry.watch ?? 'content',
-    state: st.size === 0 ? '空文件' : '正常',
-    bytes: st.size, hash: sha12(buf), version, mtime: st.mtime.toISOString(),
+    ...base,
+    state: '正常',
+    bytes: st.size,
+    hash: sha12(buf),
+    version,
+    mtime: st.mtime.toISOString(),
+    secretTypes,
+    text: st.size <= MAX_TEXT_BYTES ? text : null,
   };
 }
 
@@ -101,7 +172,84 @@ async function loadState() {
   }
 }
 
-// 与上一轮 state 对比，产出事件。事件分 info（记录级）与 warn（告警级）。
+// ---------- 字段级 diff（001-28 格式：键路径 | 旧值 → 新值 | version 旧 → 新） ----------
+// 值策略：词库文件（selfRef）整体脱敏不回显；命中敏感模式 → 前 2 后 1；其余保留但截断 80 字符。
+function makeValueFormatter(selfRef) {
+  return (v) => {
+    if (selfRef) return '(脱敏)'; // 自指保护优先：词库内容一律不回显
+    if (v === undefined || v === null) return '(空)';
+    if (typeof v === 'object') return Array.isArray(v) ? '[数组]' : '[对象]';
+    const s = String(v);
+    if (isSensitiveValue(s)) return maskValue(s);
+    return truncValue(s);
+  };
+}
+
+function diffJson(a, b, prefix, out, fmt) {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n; i++) {
+      const path = `${prefix}[${i}]`;
+      const ka = a[i];
+      const kb = b[i];
+      if (i >= a.length) out.push({ key: path, from: '(空)', to: fmt(kb) });
+      else if (i >= b.length) out.push({ key: path, from: fmt(ka), to: '(空)' });
+      else if (isPlainObject(ka) && isPlainObject(kb)) diffJson(ka, kb, path, out, fmt);
+      else if (ka !== kb) out.push({ key: path, from: fmt(ka), to: fmt(kb) });
+    }
+    return;
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
+    for (const k of keys) {
+      const ka = a[k];
+      const kb = b[k];
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (!(k in a)) out.push({ key: path, from: '(空)', to: fmt(kb) });
+      else if (!(k in b)) out.push({ key: path, from: fmt(ka), to: '(空)' });
+      else if (isPlainObject(ka) && isPlainObject(kb)) diffJson(ka, kb, path, out, fmt);
+      else if (ka !== kb) out.push({ key: path, from: fmt(ka), to: fmt(kb) });
+    }
+  } else if (a !== b) {
+    out.push({ key: prefix || '(根)', from: fmt(a), to: fmt(b) });
+  }
+}
+
+function diffText(a, b) {
+  const la = String(a).split(/\r?\n/);
+  const lb = String(b).split(/\r?\n/);
+  const out = [];
+  const n = Math.max(la.length, lb.length);
+  for (let i = 0; i < n && out.length < MAX_DIFF_ITEMS; i++) {
+    if (la[i] !== lb[i]) out.push({ key: `行${i + 1}`, from: la[i] ?? '(空)', to: lb[i] ?? '(空)' });
+  }
+  return out;
+}
+
+// 产出一条口径变更的字段级 diff；无 prevText 时返回空（仅指纹级）
+function caliberDiff(prev, curr) {
+  if (!prev?.text || !curr?.text) return [];
+  const fmt = makeValueFormatter(curr.selfRef);
+  const out = [];
+  const isJson = (s) => { try { JSON.parse(s); return true; } catch { return false; } };
+  if (isJson(prev.text) && isJson(curr.text)) {
+    diffJson(JSON.parse(prev.text), JSON.parse(curr.text), '', out, fmt);
+  } else {
+    const raw = diffText(prev.text, curr.text);
+    for (const d of raw) {
+      const from = curr.selfRef ? '(脱敏)' : (isSensitiveValue(d.from) ? maskValue(d.from) : truncValue(d.from));
+      const to = curr.selfRef ? '(脱敏)' : (isSensitiveValue(d.to) ? maskValue(d.to) : truncValue(d.to));
+      out.push({ key: d.key, from, to });
+    }
+  }
+  return out.slice(0, MAX_DIFF_ITEMS);
+}
+
+function isPlainObject(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+// ---------- v3 兼容输出：与上一轮 state 对比产出 info/warn（文本保持不变，场景1-4 自测依赖） ----------
 function caliberEvents(prev, curr) {
   const events = [];
   const prevMap = new Map((prev?.caliber ?? []).map((c) => [c.id, c]));
@@ -135,89 +283,337 @@ function caliberEvents(prev, curr) {
   return events;
 }
 
-// ---------- 主流程 ----------
-const registry = JSON.parse(await readFile(REGISTRY, 'utf8'));
+// ---------- 告警引擎（001-33 定稿②：分级 / 去重 / 状态机 / 升级） ----------
 
-const memUnits = [];
-for (const agent of registry.agents ?? []) memUnits.push(await inspectMemory(agent));
-const memV = memoryVerdict(memUnits);
-
-const calUnits = [];
-for (const entry of registry.caliber ?? []) calUnits.push(await inspectCaliber(entry));
-const calComp = caliberComposite(calUnits);
-
-const prevState = await loadState();
-const firstRun = !prevState;
-const events = firstRun ? [{ level: 'info', text: '首次运行：已建立口径基线，下一轮起开始检测变更' }] : caliberEvents(prevState, calUnits);
-
-const anomalies = [
-  ...memV.empty.map((e) => ({ level: 'warn', text: `记忆空文件：${e}` })),
-  ...memV.gone.map((e) => ({ level: 'warn', text: `记忆路径缺失：${e}` })),
-  ...memV.missing.map((u) => ({ level: 'warn', text: `未登记记忆：${u.name}` })),
-];
-const warns = [...anomalies, ...events].filter((e) => e.level === 'warn');
-const infos = events.filter((e) => e.level === 'info');
-
-const report = {
-  tool: 'collab-guard',
-  version: 3,
-  checkedAt: now(),
-  root: registry.root,
-  firstRun,
-  memory: { verdict: memV, units: memUnits },
-  caliber: { units: calUnits, composite: calComp, events },
-  summary: { warns: warns.length, infos: infos.length },
-};
-
-// 落盘：完整报告 + 下一轮对比用的 state（只在本工具目录写）
-await mkdir(REPORT_DIR, { recursive: true });
-await writeFile(join(REPORT_DIR, 'latest.json'), JSON.stringify(report, null, 2), 'utf8');
-await writeFile(STATE_FILE, JSON.stringify({
-  checkedAt: now(),
-  caliber: calUnits.map((c) => ({ id: c.id, hash: c.hash, version: c.version, state: c.state })),
-}, null, 2), 'utf8');
-
-// ---------- 输出 ----------
-const memLine = memV.parts.join(' ｜ ');
-const calLine = calUnits.length === 0
-  ? '口径未登记'
-  : `口径 ${calUnits.filter((c) => c.state === '正常').length}/${calUnits.length}`;
-const compLine = calComp ? `口径指纹 ${calComp}` : '口径指纹（无可比较文件）';
-
-if (AS_JSON) {
-  console.log(JSON.stringify(report, null, 2));
-} else if (FULL) {
-  console.log(`# 同机多 AI 协同巡检 · ${new Date().toLocaleString('sv-SE')}`);
-  console.log(`记忆：${memLine}（不做内容指纹）`);
-  console.log(`${calLine} ｜ ${compLine} ｜ 事件 ${infos.length} 记录级 / ${warns.length} 告警级`);
-  console.log('');
-  console.log('## 记忆文件（只报存在性/字节/行数）');
-  console.log('| AI | 状态 | 字节 | 行数 | 最后写入 |');
-  console.log('|---|---|---|---|---|');
-  for (const u of memUnits) {
-    if (u.files.length === 0) {
-      console.log(`| ${u.name} | 未登记路径 | - | - | - |`);
+// 本轮巡检 → P0 候选事件列表（去重与持久化在 upsert 里做）
+function buildP0Candidates(prevState, curr, firstRun) {
+  const candidates = [];
+  if (firstRun) return candidates; // 首跑只建基线，不下结论（含敏感键扫描）
+  const prevMap = new Map((prevState?.caliber ?? []).map((c) => [c.id, c]));
+  for (const c of curr) {
+    if (c.state !== '正常' || !c.hash) continue;
+    const p = prevMap.get(c.id);
+    if (!p || p.state !== '正常' || !p.hash) continue;
+    const diff = caliberDiff(p, c);
+    const versionPart = { from: p.version, to: c.version };
+    if (c.selfRef) {
+      // 词库自指保护：任何内容变更即 P0（001-30 #5：改词库=可令全部告警失效）
+      if (c.hash !== p.hash) {
+        candidates.push({
+          kind: '词库自指变更',
+          caliber: c.id, name: c.name, path: c.path,
+          version: versionPart, hash: { from: p.hash, to: c.hash },
+          diff, secrets: [], selfRef: true,
+        });
+      }
       continue;
     }
-    for (const f of u.files) {
-      const when = f.mtime ? new Date(f.mtime).toLocaleString('sv-SE') : '-';
-      console.log(`| ${u.name} | ${f.state} | ${f.bytes} | ${f.lines} | ${when} |`);
+    // 敏感键误写即 P0（003-42/001-33），与 watch 类型无关；非敏感情况下：
+    // watch=version 版本同变=正规升级（P1）；watch=content/exists 的变更归 P1/无事件，不算静默改口径
+    const hitSecret = c.secretTypes.length > 0;
+    if (!hitSecret) {
+      if (c.watch !== 'version') continue;
+      if (c.version && p.version && c.version !== p.version) continue; // 正规升级 → P1
+      if (c.hash === p.hash) continue;
+    }
+    const changed = c.hash !== p.hash;
+    if (!changed && !hitSecret) continue;
+    candidates.push({
+      kind: hitSecret ? '敏感键误写' : '静默改口径',
+      caliber: c.id, name: c.name, path: c.path,
+      version: versionPart, hash: { from: p.hash, to: c.hash },
+      diff: changed ? diff : [],
+      secrets: c.secretTypes, selfRef: false,
+    });
+  }
+  return candidates;
+}
+
+// 人读一行摘要（Doubao 001-37 #7：一句话人话结论 + 关键 diff）
+function eventSummary(e) {
+  const diffPart = e.diff.length > 0
+    ? `；diff：${e.diff.map((d) => `${d.key} | ${d.from} → ${d.to}`).join('；')}`
+    : '';
+  const verPart = e.version?.from || e.version?.to
+    ? `；version ${e.version.from ?? '?'} → ${e.version.to ?? '?'}`
+    : '';
+  const secPart = e.secrets.length > 0 ? `；命中敏感键 ${e.secrets.join('、')}（值已脱敏，只报键名）` : '';
+  const reason = e.kind === '词库自指变更'
+    ? '词库/自指保护文件被改，可令全部告警失效'
+    : e.kind === '敏感键误写'
+      ? '疑似敏感键误写进口径文件'
+      : '内容变了但版本未变，疑似静默改口径';
+  return `「${e.name}」${reason}${verPart}${diffPart}${secPart}`;
+}
+
+const dedupKeyOf = (e) => `${e.path}|${e.hash?.to ?? ''}|${e.version?.to ?? ''}`;
+
+function nextEventId(existing, tsIso) {
+  const d = tsIso.slice(0, 10).replace(/-/g, '');
+  const hms = tsIso.slice(11, 19).replace(/:/g, '');
+  const prefix = `evt-${d}-${hms}-`;
+  let seq = 1;
+  for (const e of existing) {
+    if (typeof e.id === 'string' && e.id.startsWith(prefix)) seq += 1;
+  }
+  return `${prefix}${String(seq).padStart(3, '0')}`;
+}
+
+// 去重键=路径+内容哈希+version（001-29）：同 key pending 只续轮不新增；acked 不复发；resolved 后同 key 复发计新事件
+function upsertAlerts(existing, candidates, tsIso) {
+  const created = [];
+  let touched = 0;
+  const byKey = new Map(existing.map((e) => [e.dedupKey, e]));
+  for (const cand of candidates) {
+    const key = dedupKeyOf(cand);
+    const ex = byKey.get(key);
+    if (ex && ex.status === 'pending') {
+      ex.rounds += 1;
+      ex.updatedAt = tsIso;
+      ex.escalated = ex.rounds >= ESCALATE_AFTER;
+      touched += 1;
+      continue;
+    }
+    if (ex && ex.status === 'acked') continue; // 已回执受理；内容若再变会换哈希 → 新 key 新事件
+    const ev = {
+      id: nextEventId(existing, tsIso),
+      kind: cand.kind,
+      caliber: cand.caliber,
+      name: cand.name,
+      path: cand.path,
+      level: 'P0',
+      version: cand.version,
+      hash: cand.hash,
+      dedupKey: key,
+      diff: cand.diff,
+      secrets: cand.secrets,
+      selfRef: cand.selfRef,
+      summary: eventSummary(cand),
+      status: 'pending',
+      rounds: 1,
+      escalated: false,
+      firstSeen: tsIso,
+      updatedAt: tsIso,
+      ackedAt: null,
+      resolvedAt: null,
+      note: null,
+    };
+    existing.push(ev);
+    byKey.set(key, ev);
+    created.push(ev);
+  }
+  return { created, touched };
+}
+
+async function loadAlerts() {
+  try {
+    const text = await readFile(ALERTS_FILE, 'utf8');
+    return text.split(/\r?\n/).filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function writeAlerts(alerts) {
+  const sorted = [...alerts].sort((a, b) => (a.firstSeen < b.firstSeen ? -1 : a.firstSeen > b.firstSeen ? 1 : a.id < b.id ? -1 : 1));
+  await writeFile(ALERTS_FILE, `${sorted.map((e) => JSON.stringify(e)).join('\n')}\n`, 'utf8');
+}
+
+// 板首「阻塞项 / 待老板」区自动文案（001-33 定稿第 7 条：guard 侧生成，巡查实例按未 acked 事件刷新）
+function renderBoard(pending, tsIso) {
+  const escalated = pending.filter((e) => e.escalated);
+  const normal = pending.filter((e) => !e.escalated);
+  const lines = [
+    '<!-- collab-guard 自动生成 · 请勿手改；板上回执「已核对·结论」后由值日实例执行 node guard.mjs --ack <id> -->',
+    '## 阻塞项 / 待老板',
+    '',
+  ];
+  if (pending.length === 0) {
+    lines.push('当前无阻塞项（P0 pending 0 条）。', '');
+    return lines.join('\n');
+  }
+  lines.push(`> 一句话结论：${pending.length} 条 P0 告警等待回执（其中 ${escalated.length} 条连续 ≥${ESCALATE_AFTER} 轮未处理，已升级置顶）。请相关方回执「已核对·结论：…」，由值日实例对事件 id 执行 --ack。生成时间 ${tsIso}`, '');
+  const item = (e) => `- \`${e.id}\` **${e.kind}** · ${e.name} · 待处理 ${e.rounds} 轮 · ${e.summary}`;
+  if (escalated.length > 0) {
+    lines.push(`### 🔴 置顶（连续 ≥${ESCALATE_AFTER} 轮未处理）`, '', ...escalated.map(item), '');
+  }
+  if (normal.length > 0) {
+    lines.push('### 待处理', '', ...normal.map(item), '');
+  }
+  return lines.join('\n');
+}
+
+async function appendP1(record) {
+  await writeFile(P1_FILE, `${JSON.stringify(record)}\n`, { flag: 'a' }).catch(() => {});
+}
+
+// ---------- 状态机 CLI：--ack / --resolve（对应板上「已核对·结论」回执，人工执行） ----------
+async function doTransition(kind) {
+  const flag = kind === 'ack' ? '--ack' : '--resolve';
+  const idx = argv.indexOf(flag);
+  const id = argv[idx + 1];
+  const nIdx = argv.indexOf('--note');
+  const note = nIdx >= 0 ? argv.slice(nIdx + 1).join(' ') : '';
+  if (!id || id.startsWith('--')) {
+    console.error(`缺少事件 id：用法 node guard.mjs ${flag} <id> [--note "已核对·结论：..."]`);
+    process.exit(2);
+  }
+  await mkdir(REPORT_DIR, { recursive: true });
+  const alerts = await loadAlerts();
+  const ev = alerts.find((e) => e.id === id);
+  if (!ev) {
+    console.error(`未找到事件 ${id}（现有 ${alerts.length} 条告警）`);
+    process.exit(1);
+  }
+  if (ev.status !== 'pending') {
+    console.error(`事件 ${id} 当前状态为 ${ev.status}，只有 pending 可${kind === 'ack' ? '受理' : '解除'}`);
+    process.exit(1);
+  }
+  const ts = now();
+  ev.status = kind === 'ack' ? 'acked' : 'resolved';
+  ev[kind === 'ack' ? 'ackedAt' : 'resolvedAt'] = ts;
+  ev.updatedAt = ts;
+  ev.note = note || null;
+  await writeAlerts(alerts);
+  const pending = alerts.filter((e) => e.status === 'pending');
+  await writeFile(BOARD_FILE, renderBoard(pending, ts), 'utf8');
+  console.log(`${kind === 'ack' ? '已受理' : '已解除'} ${id}${note ? `：${note}` : ''} · 剩余 pending ${pending.length} 条`);
+}
+
+const ackIdx = argv.indexOf('--ack');
+const resolveIdx = argv.indexOf('--resolve');
+if (ackIdx >= 0 || resolveIdx >= 0) {
+  await doTransition(ackIdx >= 0 ? 'ack' : 'resolve');
+} else {
+  // ---------- 主流程：巡检 ----------
+  await mkdir(REPORT_DIR, { recursive: true });
+  const registry = JSON.parse(await readFile(REGISTRY, 'utf8'));
+
+  const memUnits = [];
+  for (const agent of registry.agents ?? []) memUnits.push(await inspectMemory(agent));
+  const memV = memoryVerdict(memUnits);
+
+  const calEntries = registry.caliber ?? [];
+  const calUnits = [];
+  for (const entry of calEntries) calUnits.push(await inspectCaliber(entry));
+  const calComp = caliberComposite(calUnits);
+
+  const prevState = await loadState();
+  const firstRun = !prevState;
+  const ts = now();
+  const events = firstRun ? [{ level: 'info', text: '首次运行：已建立口径基线，下一轮起开始检测变更' }] : caliberEvents(prevState, calUnits);
+
+  // P0 候选 → 去重持久化（p0-alerts.jsonl，供 DSH p0-watch 消费与板首文案）
+  const alerts = await loadAlerts();
+  const candidates = buildP0Candidates(prevState, calUnits, firstRun);
+  const { created, touched } = upsertAlerts(alerts, candidates, ts);
+  if (created.length > 0 || touched > 0) await writeAlerts(alerts);
+  const pending = alerts.filter((e) => e.status === 'pending');
+  const escN = pending.filter((e) => e.escalated).length;
+  await writeFile(BOARD_FILE, renderBoard(pending, ts), 'utf8');
+
+  // P1 记录级 → p1-events.jsonl（板内记录 + 收件箱心跳，不置顶不通知）
+  const p1Count = [];
+  if (!firstRun) {
+    const prevMap = new Map((prevState?.caliber ?? []).map((c) => [c.id, c]));
+    for (const c of calUnits) {
+      if (c.state !== '正常' || c.selfRef) continue;
+      const p = prevMap.get(c.id);
+      if (!p || p.state !== '正常' || !p.hash || p.hash === c.hash) continue;
+      if (c.watch === 'version' && c.version && p.version && c.version !== p.version) {
+        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径正规升级', version: { from: p.version, to: c.version }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
+        p1Count.push(c.id);
+      } else if (c.watch === 'content') {
+        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径内容变更', version: { from: p.version, to: c.version }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
+        p1Count.push(c.id);
+      }
     }
   }
-  console.log('');
-  console.log('## 口径文件（合并指纹只算这些）');
-  console.log('| 口径 | 状态 | 版本 | 字节 | 指纹 | 最后写入 |');
-  console.log('|---|---|---|---|---|---|');
-  for (const c of calUnits) {
-    const when = c.mtime ? new Date(c.mtime).toLocaleString('sv-SE') : '-';
-    console.log(`| ${c.name} | ${c.state} | ${c.version ?? '-'} | ${c.bytes} | ${c.hash ?? '-'} | ${when} |`);
-  }
-} else {
-  // 默认输出：干净时一行；有事件时逐条列出
-  if (warns.length === 0 && infos.length === 0) {
-    console.log(`巡检正常 · ${memLine} · ${compLine} · ${calLine} · 口径无变更`);
+
+  const anomalies = [
+    ...memV.empty.map((e) => ({ level: 'warn', text: `记忆空文件：${e}` })),
+    ...memV.gone.map((e) => ({ level: 'warn', text: `记忆路径缺失：${e}` })),
+    ...memV.missing.map((u) => ({ level: 'warn', text: `未登记记忆：${u.name}` })),
+  ];
+  const warns = [...anomalies, ...events].filter((e) => e.level === 'warn');
+  const infos = events.filter((e) => e.level === 'info');
+
+  const report = {
+    tool: 'collab-guard',
+    version: 4,
+    checkedAt: ts,
+    root: registry.root,
+    firstRun,
+    memory: { verdict: memV, units: memUnits },
+    // 注意：units 不含 text（口径原文只进 state.json 供下轮字段级 diff，绝不进任何报告类产物——003-42 搜索面判据）
+    caliber: { units: calUnits.map(({ text, ...rest }) => rest), composite: calComp, events },
+    alerts: { total: alerts.length, pending: pending.length, escalated: escN, events: pending },
+    summary: { warns: warns.length, infos: infos.length, p0pending: pending.length, escalated: escN, p1: p1Count.length },
+  };
+
+  // 落盘：完整报告 + 下一轮对比用的 state（只在本工具目录写；state 含口径原文供下轮字段级 diff）
+  await writeFile(join(REPORT_DIR, 'latest.json'), JSON.stringify(report, null, 2), 'utf8');
+  await writeFile(STATE_FILE, JSON.stringify({
+    checkedAt: ts,
+    caliber: calUnits.map((c) => ({ id: c.id, hash: c.hash, version: c.version, state: c.state, selfRef: c.selfRef, text: c.text })),
+  }, null, 2), 'utf8');
+
+  // ---------- 输出 ----------
+  const memLine = memV.parts.join(' ｜ ');
+  const calLine = calUnits.length === 0
+    ? '口径未登记'
+    : `口径 ${calUnits.filter((c) => c.state === '正常').length}/${calUnits.length}`;
+  const compLine = calComp ? `口径指纹 ${calComp}` : '口径指纹（无可比较文件）';
+  const alertLine = pending.length > 0
+    ? `⚠ P0 告警 pending ${pending.length} 条${escN > 0 ? `（置顶 ${escN}）` : ''} · 板首阻塞区 reports/board-pending.md`
+    : '·';
+
+  if (AS_JSON) {
+    console.log(JSON.stringify(report, null, 2));
+  } else if (FULL) {
+    console.log(`# 同机多 AI 协同巡检 · ${new Date().toLocaleString('sv-SE')}`);
+    console.log(`记忆：${memLine}（不做内容指纹）`);
+    console.log(`${calLine} ｜ ${compLine} ｜ 事件 ${infos.length} 记录级 / ${warns.length} 告警级`);
+    console.log('');
+    console.log('## 记忆文件（只报存在性/字节/行数）');
+    console.log('| AI | 状态 | 字节 | 行数 | 最后写入 |');
+    console.log('|---|---|---|---|---|');
+    for (const u of memUnits) {
+      if (u.files.length === 0) {
+        console.log(`| ${u.name} | 未登记路径 | - | - | - |`);
+        continue;
+      }
+      for (const f of u.files) {
+        const when = f.mtime ? new Date(f.mtime).toLocaleString('sv-SE') : '-';
+        console.log(`| ${u.name} | ${f.state} | ${f.bytes} | ${f.lines} | ${when} |`);
+      }
+    }
+    console.log('');
+    console.log('## 口径文件（合并指纹只算这些）');
+    console.log('| 口径 | 状态 | 版本 | 字节 | 指纹 | 最后写入 |');
+    console.log('|---|---|---|---|---|---|');
+    for (const c of calUnits) {
+      const when = c.mtime ? new Date(c.mtime).toLocaleString('sv-SE') : '-';
+      console.log(`| ${c.name} | ${c.state} | ${c.version ?? '-'} | ${c.bytes} | ${c.hash ?? '-'} | ${when} |`);
+    }
+    console.log('');
+    console.log(`## P0 告警（pending ${pending.length} / 置顶 ${escN} · 默认不外发，见 reports/board-pending.md）`);
+    if (pending.length === 0) {
+      console.log('（无）');
+    } else {
+      console.log('| id | 类型 | 名称 | 轮次 | 摘要 |');
+      console.log('|---|---|---|---|---|');
+      for (const e of pending) {
+        console.log(`| ${e.id} | ${e.kind} | ${e.name} | ${e.rounds}${e.escalated ? '（置顶）' : ''} | ${e.summary} |`);
+      }
+    }
   } else {
-    console.log(`巡检 · ${memLine} · ${compLine} · ${calLine}`);
-    for (const e of [...warns, ...infos]) console.log(`${e.level === 'warn' ? '⚠' : '·'} ${e.text}`);
+    // 默认输出：干净时一行；有事件时逐条列出（告警明细只在 --full/--json/板首文件，默认不刷屏）
+    if (warns.length === 0 && infos.length === 0) {
+      console.log(`巡检正常 · ${memLine} · ${compLine} · ${calLine} · 口径无变更${pending.length > 0 ? ` · ${alertLine}` : ''}`);
+    } else {
+      console.log(`巡检 · ${memLine} · ${compLine} · ${calLine}${pending.length > 0 ? `\n${alertLine}` : ''}`);
+      for (const e of [...warns, ...infos]) console.log(`${e.level === 'warn' ? '⚠' : '·'} ${e.text}`);
+    }
   }
 }

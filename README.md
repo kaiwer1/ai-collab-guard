@@ -20,7 +20,7 @@
 | `registry.json` | 登记表（真实路径，**不入库**，从模板复制改写） |
 | `registry.example.json` | 登记表模板 |
 | `docs/开发日志.md` | 版本与设计决策 |
-| `reports/`、`state.json` | 本地运行态（不入库） |
+| `reports/`、`state.json` | 本地运行态（不入库）：`latest.json` / `p0-alerts.jsonl` / `p1-events.jsonl` / `board-pending.md` |
 
 ## 用法
 
@@ -32,12 +32,33 @@ node guard.mjs --full                    # 完整表格
 node guard.mjs --registry <path>         # 指定别的登记表（自测用）
 ```
 
-巡检结果写入 `reports/latest.json`；`state.json` 存上一轮口径指纹/版本，下一轮对比。首次运行自动建立基线。
+巡检结果写入 `reports/latest.json`；`state.json` 存上一轮口径指纹/版本与口径原文（仅工具内部，供下轮字段级 diff）。首次运行自动建立基线。
+
+## 告警送达（v4，留言板 001-33 定稿②）
+
+```
+P0 = 静默改口径（内容哈希变、version 未升）｜ 敏感键误写进口径文件 ｜ 词库自指变更（selfRef 文件被改）
+P1 = 口径正规升级（内容与 version 同变）｜ 口径内容变更（watch=content）
+P2 = 存量告警（记忆空文件/路径缺失/未登记）——每小时聚合一行，不逐条上板
+```
+
+- **P0 → `reports/p0-alerts.jsonl`**：`id` 稳定唯一（`evt-YYYYMMDD-hhmmss-NNN`）；**去重键 = 口径文件路径 + 内容哈希 + version**，同一 key 只首次上板、仅状态变化才更新（pending 事件同 key 只续轮不新增；acked 不复发；resolved 后同 key 复发计新事件）。
+- **状态机**：`status: pending | acked | resolved`；**同一 P0 连续 ≥2 轮未处理自动升级置顶**；解除/降级必须走回执，不许静默消失。
+- **板首文案**：`reports/board-pending.md`（「阻塞项/待老板」区）由 guard 自动生成，巡查实例每轮按未 acked 事件刷新；默认**不外发**（001-31 老板指示），`--deliver` 保留为人工/诊断通道（DSH `p0-watch.mjs` 同址消费该 jsonl）。
+- **字段级 diff**：JSON 递归键路径，格式 `键路径 | 旧值 → 新值 | version 旧 → 新`；非 JSON 按行号；guard 同时产出机器可读 jsonl 与人读一行摘要。
+- **脱敏**：敏感命中只报键名 + 命中类型、不报值；值只留前 2 后 1；长度 <12 的值不做无条件子串匹配（改为断言占位替换）；词库文件（`selfRef: true`）diff 值整体脱敏——改词库 = 可令全部告警失效，故其本身被改即 P0。
+- **回执 CLI**（对应板上「已核对·结论」，由值日实例人工执行）：
+
+```bash
+node guard.mjs --ack <事件id> --note "已核对·结论：..."     # pending → acked
+node guard.mjs --resolve <事件id> --note "..."             # pending → resolved（解除）
+node guard.mjs --full                                     # 表格输出含 pending 告警清单
+```
 
 ## 自测（共建时改前跑一遍、改后跑一遍）
 
 ```bash
-npm test        # = node scripts/selftest.mjs，四场景：基线/无变更/静默改口径告警/正规升版本
+npm test        # = node scripts/selftest.mjs，七场景：基线/无变更/静默改口径告警/正规升版本/敏感键误写脱敏/去重+升级置顶+ack/词库自指
 ```
 
 自测只在临时目录造夹具，不碰真实 `registry.json` 与被巡检文件；退出码 0 = 全过。

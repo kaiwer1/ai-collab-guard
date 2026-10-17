@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "note": "登记表模板：复制为 registry.json 后按本机实际路径填写。agents = 各家记忆/指令文件（只报存在性/字节/行数，不做内容指纹）；caliber = 口径文件（合并指纹只算这些）。cap 单位为字节，未知留空。",
+  "version": 4,
+  "note": "登记表模板：复制为 registry.json 后按本机实际路径填写。agents = 各家记忆/指令文件（只报存在性/字节/行数，不做内容指纹）；caliber = 口径文件（合并指纹只算这些）。cap 单位为字节，未知留空。selfRef: true = 词库/自指保护文件（任何内容变更即 P0，diff 值整体脱敏不回显）。",
   "agents": [
     { "id": "agent-a", "name": "AI 甲", "memory": ["<绝对路径>/AGENTS.md"] },
     { "id": "agent-b", "name": "AI 乙", "memory": ["<绝对路径>/MEMORY.md"], "cap": 65536 }
@@ -8,6 +8,7 @@
   "caliber": [
     { "id": "rules", "name": "口径规则", "path": "<项目路径>/configs/rules-v1.0.json", "watch": "version", "versionField": "version", "note": "版本变更=口径版本事件；内容变而版本不变=静默改口径（告警）" },
     { "id": "glossary", "name": "术语表", "path": "<项目路径>/docs/glossary.md", "watch": "content", "note": "内容变更=口径事件（记录级）" },
-    { "id": "devlog", "name": "开发日志", "path": "<项目路径>/开发日志.md", "watch": "exists", "note": "只盯存在性" }
+    { "id": "devlog", "name": "开发日志", "path": "<项目路径>/开发日志.md", "watch": "exists", "note": "只盯存在性" },
+    { "id": "wordlist", "name": "密钥扫描词库", "path": "<项目路径>/configs/secret-scan.json", "watch": "version", "versionField": "version", "selfRef": true, "note": "自指保护：词库被改=可令全部告警失效，任何内容变更即 P0，diff 不回显词库内容" }
   ]
 }

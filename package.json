@@ -1,6 +1,6 @@
 {
   "name": "ai-collab-guard",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "description": "同机多 AI 协同工具（collab-guard）：口径文件只读巡检与变更检测",
   "type": "module",
   "private": true,
