@@ -418,6 +418,56 @@ try {
   const d3 = (await p1Records()).filter((r) => r.name === '测试术语表').pop()?.diff ?? [];
   check('场景10d-5c 删除行形态（非空→(无此行)）', d3.some((d) => NONEMPTY.test(d.from) && d.to === '(无此行)'), JSON.stringify(d3));
 
+  // 场景 10f（v4.5：Codex 001-80 边界复核）——safeVersion 收窄为「版本结构语义」：
+  // 长度+字符集不足以表达版本号（20 字符 MockOpaqueValue123456 同样满足 ^[\w.+-]{1,24}$）。
+  // 承诺口径：含「数字.数字」核心（0.49.12 / v1.0.0 / 1.0.0-beta.1 / 1.2.3+build.…
+  // / copy-compliance-2026.10.15-v1）原样回显；裸数字、无点结构不透明串、换行一律 (未回显)；
+  // 长度 ≤24；state.json 取证例外保留原文。Codex 点名夹具：正常版本/短不透明串/24 边界/异常分隔。
+  const p1Last = async () => (await p1Records()).filter((r) => r.name === '测试ROI规则').pop();
+  const V_NORMAL = '0.49.12';
+  const V_OPAQUE_SHORT = 'MockOpaque123';            // 12 字符无版本核心 → 不回显
+  const V_OPAQUE_LONG = 'MockOpaqueValue123456';      // 20 字符无版本核心 → 不回显（001-80 一手复现串）
+  const V_BOUNDARY_OK = '1.2.3+build.20261018.123';   // 恰 24 字符、有核心 → 回显
+  const V_BOUNDARY_OVER = '1.2.3+build.20261018.1234'; // 25 字符 → 不回显
+  const V_WEIRD = '1.0\nsk-x';                        // 换行不在字符集 → 不回显
+  const step10f = async (v, content) => {
+    await writeFile(roiPath, JSON.stringify({ version: v, rules: content }, null, 2));
+    const r = await run(registry);
+    return { r, p1: await p1Last() };
+  };
+  // 10f-1 正常版本回显，P1 事件/latest.json/stdout 三处一致
+  const f1 = await step10f(V_NORMAL, { breakeven: 14.81 });
+  const latest10f = await readFile(join(tmp, 'reports', 'latest.json'), 'utf8');
+  check('场景10f-1 正常版本号回显且 P1/latest/stdout 三处一致',
+    f1.p1?.version?.to === V_NORMAL && f1.r.stdout.includes(`口径版本变更：测试ROI规则 2.1 → ${V_NORMAL}`)
+    && JSON.parse(latest10f).caliber.units.find((u) => u.id === 'roi').version === V_NORMAL,
+    `${f1.p1?.version?.to} | ${f1.r.stdout.split('\n').find((l) => l.includes('口径版本变更'))}`);
+  // 10f-2 短不透明串不回显（P0 与 P1 两路径都不回显）
+  const f2 = await step10f(V_OPAQUE_SHORT, { breakeven: 14.82 });
+  check('场景10f-2 短不透明串 version 不回显（(未回显)，P1 路径）',
+    f2.p1?.version?.to === '(未回显)' && !f2.r.stdout.includes(V_OPAQUE_SHORT), f2.r.stdout);
+  // 10f-3 长不透明串不回显（Codex 001-80 一手复现串）
+  const f3 = await step10f(V_OPAQUE_LONG, { breakeven: 14.83 });
+  const latest10f3 = await readFile(join(tmp, 'reports', 'latest.json'), 'utf8');
+  check('场景10f-3 长不透明串 version 不回显且 latest.json 同步受约束',
+    f3.p1?.version?.to === '(未回显)' && !latest10f3.includes(V_OPAQUE_LONG), latest10f3.slice(0, 200));
+  // 10f-4 长度边界：24 字符回显 / 25 字符不回显
+  const f4 = await step10f(V_BOUNDARY_OK, { breakeven: 14.84 });
+  check('场景10f-4a 24 字符合法版本回显（v4.5 长度上限维持）',
+    f4.p1?.version?.to === V_BOUNDARY_OK, f4.p1?.version?.to);
+  const f5 = await step10f(V_BOUNDARY_OVER, { breakeven: 14.85 });
+  check('场景10f-4b 25 字符版本不回显', f5.p1?.version?.to === '(未回显)', f5.p1?.version?.to);
+  // 10f-5 异常分隔/换行不回显
+  const f6 = await step10f(V_WEIRD, { breakeven: 14.86 });
+  check('场景10f-5 换行分隔 version 不回显', f6.p1?.version?.to === '(未回显)' && !f6.r.stdout.includes('sk-x'), f6.p1?.version?.to);
+  // 10f-6 原文仍进取证例外区（state.json）——收窄回显不削取证。
+  // 注意：state.json 只存**最后一轮**口径状态，且 JSON 序列化会转义换行——按值解析断言，不做子串包含。
+  const f7 = await step10f(V_OPAQUE_LONG, { breakeven: 14.87 });
+  const state10f = JSON.parse(await readFile(join(tmp, 'state.json'), 'utf8'));
+  const roiState10f = state10f.caliber.find((c) => c.id === 'roi');
+  check('场景10f-6 不回显的 version 原文仍保留在 state.json（取证例外不削）',
+    roiState10f?.version === V_OPAQUE_LONG && f7.p1?.version?.to === '(未回显)', JSON.stringify(roiState10f?.version));
+
   // 场景 10e（v4.4：001-73 四 (a) / 001-74.4 附议）——本机路径属可回显元数据（stdout/latest.json
   // 可带），但上板公开面只抄 board-pending.md、不抄 stdout 明细。用独立小 registry（记忆路径
   // 缺失）演示不对称：stdout 带绝对路径，板首必须零路径；renderBoard 本就不用 path，现钉成断言。

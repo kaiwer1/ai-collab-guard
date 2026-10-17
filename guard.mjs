@@ -113,13 +113,19 @@ function maskValue(v) {
 // 文件内容取值）：不命中任何敏感模式的长串 version 会原样进板首/stdout/latest.json/p0-alerts
 // 的 version.to 与 dedupKey——「note 被脱敏、version 全裸」并存于同一行摘要（一手实测）。
 // 修法=**约束回显形态而非放行某类值**（比短值白名单更窄——001-70 二共识不开白名单）：
-// 形如常规版本号（[\w.+-]{1,24}）且不命中敏感模式 → 原样回显；其余一律 '(未回显)'。
-// 正常 0.49.11 → 0.49.12 照旧可读；异常形态自动不回显。state.json 保留原文（例外区+对比基准）。
+// v4.4：字符集+长度约束（^[\w.+-]{1,24}$）。
+// v4.5（Codex 001-80 边界复核）：长度+字符集不足以表达「版本号」语义——20 字符的
+//   MockOpaqueValue123456 同样满足该式。收窄为**结构语义**：必须含「数字.数字」版本核心
+//   （\d+(\.\d+)+）。承诺口径：0.49.11 / v1.0.0 / 1.0.0-beta.1 / 1.2.3+build.20261018.123
+//   / copy-compliance-2026.10.15-v1 原样回显（v 前缀与项目 slug 前缀不限、预发布与构建元数据
+//   支持、长度 ≤24）；裸数字（23）、无点结构的不透明串一律 '(未回显)'；换行/异常分隔不在字符集内。
+// state.json 保留原文（例外区+下轮对比基准），取证通道不削。
 const VERSION_ECHO_RE = /^[\w.+-]{1,24}$/;
+const VERSION_CORE_RE = /\d+(\.\d+)+/;
 function safeVersion(v) {
   if (v === undefined || v === null) return null;
   const s = String(v);
-  return VERSION_ECHO_RE.test(s) && !isSensitiveValue(s) ? s : '(未回显)';
+  return VERSION_ECHO_RE.test(s) && VERSION_CORE_RE.test(s) && !isSensitiveValue(s) ? s : '(未回显)';
 }
 // 展示用（--full 表格等）：null/undefined → '-'
 const showVersion = (v) => (v === undefined || v === null ? '-' : safeVersion(v));
@@ -406,6 +412,11 @@ function eventSummary(e) {
 }
 
 // v4.4（001-73 二.4）：version 段改哈希拼接——version 显示值已受 safeVersion 形态约束，去重键不再内嵌 version 原文
+// v4.5（Codex 001-80 去重旁注留痕，勿改）：version 段哈希对象是**掩码后的显示值**（如 '(未回显)'
+// 恒等），非 version 原文——这是设计而非疏漏：① version 变更必伴随同文件内容 hash 变更，
+// dedupKey 的 hash.to 段已可区分不同版本（GLM5.3Flash 001-77 二核实认可、QwenWork 001-78 五
+// 一手探针佐证 sha12('') 塌缩无害）；② 若改哈希原文，反与 10d-2「12 位哈希不含原文」断言
+// 自相矛盾。防后人当 bug 修回。
 const dedupKeyOf = (e) => `${e.path}|${e.hash?.to ?? ''}|${sha12(Buffer.from(String(e.version?.to ?? '')))}`;
 
 function nextEventId(existing, tsIso) {
@@ -628,7 +639,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
 
   const report = {
     tool: 'collab-guard',
-    version: '4.4',
+    version: '4.5',
     checkedAt: ts,
     root: registry.root,
     firstRun,
