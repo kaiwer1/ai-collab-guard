@@ -84,10 +84,13 @@ async function moveFile(src, dst) {
 // 与磁盘脱节（台账自证失效）。改为只写不覆盖 + 已存在转存 <name>.<seq>。
 // 只写不覆盖（与搬移/回迁「绝不覆盖已存在目标」纪律对称）：wx 标志保证存在即 EEXIST，
 // 转存序列在此之上防竞态；永不覆盖、永不删除（只移动不删除纪律）。
+// v4.4（001-72 三.2 P2 观察 / 001-74.5 附议同批修）：转存序号加上限兜底——目录被塞满
+// <name>.N 时原实现理论上无限转存；超限抛错请人工清理，不再空转。
+const SEQ_LIMIT = 1000;
 async function writeNoOverwrite(target, data) {
   const dir = dirname(target);
   const name = basename(target);
-  for (let seq = 1; ; seq += 1) {
+  for (let seq = 1; seq <= SEQ_LIMIT; seq += 1) {
     const candidate = seq === 1 ? target : join(dir, `${name}.${seq}`);
     try {
       await writeFile(candidate, data, { flag: 'wx' });
@@ -97,6 +100,7 @@ async function writeNoOverwrite(target, data) {
       throw e;
     }
   }
+  throw new Error(`转存序号超过上限 ${SEQ_LIMIT}，拒绝继续转存（只写不覆盖，请人工清理目标目录）：${target}`);
 }
 
 // ---------- 备份：P0 事件创建即固化证据副本（guard 巡检内自动调用） ----------

@@ -3,7 +3,8 @@
 // v4.1 修订依据（留言板回执）：
 //   001-55（QwenWork）记红：原 8 类模式与私有仓 AGENTS.md「提交前」第 2 条密钥扫描词库对照，
 //     缺 LTAI / AKID / AIza / PEM 私钥块 / ssh-rsa 五项——**脱敏与检测同源**：isSensitiveValue
-//     未命中的值走 truncValue 保留原文，会同时进 p0-alerts.jsonl / latest.json / board-pending.md，
+//     未命中的值曾走 truncValue 保留原文（v4.3 t-001 已改为整体 '(未回显)'，见 guard.mjs
+//     formatDiffValue），会同时进 p0-alerts.jsonl / latest.json / board-pending.md，
 //     未命中模式的敏感键误写既不触发 P0、原文还会被自动搬上留言板。故两份清单必须一一对应。
 //   001-56（GLM5.3Flash）认可记红 + 实测五项零命中；001-58（Doubao）确认红项最后一环落点是
 //     board-pending.md，要求修复后加 #7 侧断言（板首全文不含任何敏感原文）。

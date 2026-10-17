@@ -36,8 +36,21 @@
 //   备份/quarantine（scripts/quarantine.mjs，guard 与 CLI 共用单源）——只移动不删除 + 台账 jsonl + 限时保留。
 //   P0 事件创建即把被巡检文件原字节固化到 reports/evidence/<事件id>/（只读被巡检路径，只写本工具目录，
 //   不破坏只读纪律）；人工显式 --quarantine/--unquarantine 才搬移文件；台账到期只标「待人工清理」，永不删。
-// 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json；
-//   p0-alerts.jsonl / board-pending.md 只由本工具生成，回执只能通过 --ack/--resolve 进行。
+// v4.4（2026-10-18 · workbuddy-step-5-preview，按 001-71/001-72/001-73/001-74 v4.3 复跑回执，t-001 闭项批次）：
+//   ① version 残余通道（001-73 二.3 探针发现 + 一手实测 / 001-74 独立复核确认，P2）：
+//      version 曾是 formatDiffValue 之外唯一仍以原文回显的文件派生值——不命中模式的长串
+//      原样进板首/stdout/latest.json/p0-alerts.jsonl 的 version.to 与 dedupKey（note 被脱敏、
+//      version 全裸并存于同一行摘要）。改为**回显形态约束**（非值白名单）：形如常规版本号
+//      （^[\w.+-]{1,24}$）且不命中敏感模式才原样回显，其余一律 '(未回显)'；dedupKeyOf 的
+//      version 段改 sha12 哈希（去重语义不变、产物不含原文）。正常 0.49.11 → 0.49.12 不受影响。
+//      落点：versionPart / caliberEvents 基线与版本变更行 / P1 记录 / report.caliber.units /
+//      --full 版本列。state.json 保留 version 原文（取证例外区 + 下轮对比基准，见 001-67 口径）。
+//   ② 行 diff '(空)' 哨兵回归（001-73 三，判黄应修 / 001-74.3 附议）：v4.2 truncValue 曾让
+//      '(空)' 原样保留，v4.3 改整体不回显后哨兵被一起吞掉——markdown 口径「清空/新增/改写」
+//      三类变更完全不可区分。改为行侧**变更类别枚举**：(无此行)=该侧无此行 / (空行)=空行 /
+//      (非空 N字节)=非空行只报长度（敏感行仍前 2 后 1）——四态全覆盖、零原文、可直接断言。
+//   ③ 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json；
+//      p0-alerts.jsonl / board-pending.md 只由本工具生成，回执只能通过 --ack/--resolve 进行。
 // 用法：node guard.mjs [--json] [--full] [--registry <path>]
 //       node guard.mjs --ack <id> --note "..." | --resolve <id> --note "..."
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
@@ -94,6 +107,22 @@ function maskValue(v) {
   if (s.length <= 3) return '(脱敏)';
   return `${s.slice(0, 2)}…${s.slice(-1)}`;
 }
+
+// ---------- version 回显形态约束（v4.4，001-73 二.3 探针发现 / 001-74 独立复核确认，P2） ----------
+// version 曾是 formatDiffValue 之外唯一仍以原文回显的文件派生值（inspectCaliber 直接从口径
+// 文件内容取值）：不命中任何敏感模式的长串 version 会原样进板首/stdout/latest.json/p0-alerts
+// 的 version.to 与 dedupKey——「note 被脱敏、version 全裸」并存于同一行摘要（一手实测）。
+// 修法=**约束回显形态而非放行某类值**（比短值白名单更窄——001-70 二共识不开白名单）：
+// 形如常规版本号（[\w.+-]{1,24}）且不命中敏感模式 → 原样回显；其余一律 '(未回显)'。
+// 正常 0.49.11 → 0.49.12 照旧可读；异常形态自动不回显。state.json 保留原文（例外区+对比基准）。
+const VERSION_ECHO_RE = /^[\w.+-]{1,24}$/;
+function safeVersion(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v);
+  return VERSION_ECHO_RE.test(s) && !isSensitiveValue(s) ? s : '(未回显)';
+}
+// 展示用（--full 表格等）：null/undefined → '-'
+const showVersion = (v) => (v === undefined || v === null ? '-' : safeVersion(v));
 
 // ---------- 记忆巡检（v3 收窄：只报存在性/字节/行数，不做内容指纹） ----------
 async function inspectMemory(agent) {
@@ -233,8 +262,10 @@ function diffText(a, b) {
   const lb = String(b).split(/\r?\n/);
   const out = [];
   const n = Math.max(la.length, lb.length);
+  // v4.4（001-73 三）：越界行保持 undefined（该侧无此行），不再折成字符串 '(空)'——
+  // 字符串 '(空)' 会继续走 formatDiffValue 变成 '(未回显)'，与空行、改写不可区分。
   for (let i = 0; i < n && out.length < MAX_DIFF_ITEMS; i++) {
-    if (la[i] !== lb[i]) out.push({ key: `行${i + 1}`, from: la[i] ?? '(空)', to: lb[i] ?? '(空)' });
+    if (la[i] !== lb[i]) out.push({ key: `行${i + 1}`, from: la[i], to: lb[i] });
   }
   return out;
 }
@@ -250,9 +281,23 @@ function caliberDiff(prev, curr) {
   } else {
     const raw = diffText(prev.text, curr.text);
     for (const d of raw) {
-      // 非 JSON 按行 diff：行值同样不回显原文（'(未回显)'），空行两侧保留 '(空)'
-      const line = (v) => (v === undefined || v === null ? '(空)' : formatDiffValue(v, curr.selfRef));
-      out.push({ key: d.key, from: line(d.from), to: line(d.to) });
+      // 非 JSON 按行 diff（v4.4，001-73 三判黄应修 / 001-74.3 附议）：行侧回显**变更类别枚举**——
+      // v4.2 的 truncValue 曾让 '(空)' 哨兵原样保留，v4.3 改整体不回显后哨兵被一起吞掉，
+      // markdown 口径「清空/新增/改写」三类变更完全不可区分（v4.3 引入的可用性回归）。
+      // 四态全覆盖、不含原文，10b 反向断言可直接断：
+      //   (无此行)          = 该侧不存在这行（→(无此行)=删除行；(无此行)→=新增行）
+      //   (空行)            = 该侧是空行（…→(空行)=改为空行；(空行)→…=改为非空）
+      //   (非空 N字节)      = 该侧是非空行，只报长度不报内容（(非空)→(非空)=改写）
+      //   命中敏感模式的行走 maskValue 前 2 后 1（003-42 判据2，与 JSON 分支一致）；
+      //   selfRef 词库文件的非空行维持 v4.1 ③ 契约整体 '(脱敏)'（词库内容一律不回显）
+      const lineLabel = (v) => v === undefined
+        ? '(无此行)'
+        : v === ''
+          ? '(空行)'
+          : (curr.selfRef
+            ? '(脱敏)'
+            : (isSensitiveValue(v) ? maskValue(v) : `(非空 ${Buffer.byteLength(v, 'utf8')}字节)`));
+      out.push({ key: d.key, from: lineLabel(d.from), to: lineLabel(d.to) });
     }
   }
   return out.slice(0, MAX_DIFF_ITEMS);
@@ -277,12 +322,12 @@ function caliberEvents(prev, curr) {
       continue;
     }
     if (!p || p.state === '缺失') {
-      events.push({ level: 'info', text: `口径文件基线建立：${c.name}${c.version ? ` v${c.version}` : ''}（${c.hash}）` });
+      events.push({ level: 'info', text: `口径文件基线建立：${c.name}${c.version ? ` v${safeVersion(c.version)}` : ''}（${c.hash}）` });
       continue;
     }
     if (c.watch === 'version') {
       if (c.version && p.version && c.version !== p.version) {
-        events.push({ level: 'info', text: `口径版本变更：${c.name} ${p.version} → ${c.version}` });
+        events.push({ level: 'info', text: `口径版本变更：${c.name} ${safeVersion(p.version)} → ${safeVersion(c.version)}` });
       } else if (c.hash !== p.hash) {
         events.push({ level: 'warn', text: `静默改口径告警：${c.name} 内容变了但版本未变（${p.hash} → ${c.hash}）——请核对是否改了阈值/字段定义` });
       }
@@ -308,7 +353,8 @@ function buildP0Candidates(prevState, curr, firstRun) {
     const p = prevMap.get(c.id);
     if (!p || p.state !== '正常' || !p.hash) continue;
     const diff = caliberDiff(p, c);
-    const versionPart = { from: p.version, to: c.version };
+    // v4.4（001-73 二）：version 显示值走 safeVersion 形态约束，原文只留 state.json（例外区）
+    const versionPart = { from: safeVersion(p.version), to: safeVersion(c.version) };
     if (c.selfRef) {
       // 词库自指保护：任何内容变更即 P0（001-30 #5：改词库=可令全部告警失效）
       if (c.hash !== p.hash) {
@@ -359,7 +405,8 @@ function eventSummary(e) {
   return `「${e.name}」${reason}${verPart}${diffPart}${secPart}`;
 }
 
-const dedupKeyOf = (e) => `${e.path}|${e.hash?.to ?? ''}|${e.version?.to ?? ''}`;
+// v4.4（001-73 二.4）：version 段改哈希拼接——version 显示值已受 safeVersion 形态约束，去重键不再内嵌 version 原文
+const dedupKeyOf = (e) => `${e.path}|${e.hash?.to ?? ''}|${sha12(Buffer.from(String(e.version?.to ?? '')))}`;
 
 function nextEventId(existing, tsIso) {
   const d = tsIso.slice(0, 10).replace(/-/g, '');
@@ -562,10 +609,10 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
       const p = prevMap.get(c.id);
       if (!p || p.state !== '正常' || !p.hash || p.hash === c.hash) continue;
       if (c.watch === 'version' && c.version && p.version && c.version !== p.version) {
-        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径正规升级', version: { from: p.version, to: c.version }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
+        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径正规升级', version: { from: safeVersion(p.version), to: safeVersion(c.version) }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
         p1Count.push(c.id);
       } else if (c.watch === 'content') {
-        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径内容变更', version: { from: p.version, to: c.version }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
+        await appendP1({ ts, level: 'P1', caliber: c.id, name: c.name, kind: '口径内容变更', version: { from: safeVersion(p.version), to: safeVersion(c.version) }, hash: { from: p.hash, to: c.hash }, diff: caliberDiff(p, c) });
         p1Count.push(c.id);
       }
     }
@@ -581,13 +628,14 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
 
   const report = {
     tool: 'collab-guard',
-    version: '4.3',
+    version: '4.4',
     checkedAt: ts,
     root: registry.root,
     firstRun,
     memory: { verdict: memV, units: memUnits },
-    // 注意：units 不含 text（口径原文只进 state.json 供下轮字段级 diff，绝不进任何报告类产物——003-42 搜索面判据）
-    caliber: { units: calUnits.map(({ text, ...rest }) => rest), composite: calComp, events },
+    // 注意：units 不含 text（口径原文只进 state.json 供下轮字段级 diff，绝不进任何报告类产物——003-42 搜索面判据）；
+    // v4.4：units.version 走 safeVersion 形态约束（001-73 二）——latest.json 属「不得含原文」产物
+    caliber: { units: calUnits.map(({ text, ...rest }) => ({ ...rest, version: safeVersion(rest.version) })), composite: calComp, events },
     alerts: { total: alerts.length, pending: pending.length, escalated: escN, events: pending },
     summary: { warns: warns.length, infos: infos.length, p0pending: pending.length, escalated: escN, p1: p1Count.length },
     quarantine: { entries: ledger.length, expired: expiredLedger.length, retainDays: RETAIN_DAYS },
@@ -636,7 +684,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
     console.log('|---|---|---|---|---|---|');
     for (const c of calUnits) {
       const when = c.mtime ? new Date(c.mtime).toLocaleString('sv-SE') : '-';
-      console.log(`| ${c.name} | ${c.state} | ${c.version ?? '-'} | ${c.bytes} | ${c.hash ?? '-'} | ${when} |`);
+      console.log(`| ${c.name} | ${c.state} | ${showVersion(c.version)} | ${c.bytes} | ${c.hash ?? '-'} | ${when} |`);
     }
     console.log('');
     console.log(`## P0 告警（pending ${pending.length} / 置顶 ${escN} · 默认不外发，见 reports/board-pending.md）`);

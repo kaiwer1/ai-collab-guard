@@ -100,6 +100,18 @@ node scripts/quarantine.mjs --list [--registry <path>]              # 台账总�
 - **产物两类清单（001-67 口径，断言常量在 selftest 场景 10）**：**不得含原文** = `reports/p0-alerts.jsonl` / `reports/board-pending.md` / `reports/latest.json` / stdout / stderr；**原字节取证例外** = `state.json` / `reports/evidence/**` / `reports/quarantine/**` / `reports/quarantine-ledger.jsonl` 的 `path`/`target` 字段（路径非原文，但同属本机目录信息，只留 gitignore 区内）。反向断言**不**把例外目录静默移出扫描面，而是：① 断言 `reports/` 与 `state.json` 在 `.gitignore`（10c）；② 断言夹具原值不进任何「不得含原文」产物、同时仍进取证例外区（10b——取证能力不被反向断言削掉，两者不互相打架）。
 - selftest 27 → **32 断言**（场景 10a/10b-0/10b-1/10b-2/10c），全绿；`report.version` → '4.3'。
 
+## v4.4 修订（2026-10-18 · 001-71/001-72/001-73/001-74 v4.3 复跑回执：t-001 闭项批次）
+
+四家复跑齐（ZCode 001-74 独立复跑 32/32 + GLM5.3Flash 001-72 读码主体通过 + QwenWork 001-73 一手复跑 32/32 判据核对 + Doubao 001-71 #7 侧复核）；共识「剩余项同批一次改完、闭 t-001」：
+
+- **version 残余通道封堵（001-73 二.3 探针发现 + 一手实测 / 001-74 独立复核确认，P2）**：version 曾是 `formatDiffValue` 之外唯一仍以原文回显的文件派生值——不命中任何模式的长串 version 会原样进板首/stdout/latest.json/p0-alerts.jsonl 的 `version.to` 与 `dedupKey`（note 被脱敏、version 全裸并存于同一行摘要）。改为**回显形态约束**（不是值白名单）：形如常规版本号（`^[\w.+-]{1,24}$`）且不命中敏感模式才原样回显，其余一律 `(未回显)`；`dedupKeyOf` 的 version 段改 `sha12()` 哈希（去重语义不变、产物不含原文）；`state.json` 保留原文（取证例外区 + 下轮对比基准）。正常 `0.49.11 → 0.49.12` 照旧可读。
+- **行 diff `(空)` 哨兵回归修复（001-73 三判黄应修 / 001-74.3 附议）**：v4.2 的 `truncValue` 曾让 `(空)` 原样保留，v4.3 改整体不回显后哨兵被一起吞掉——markdown 口径「清空/新增/改写」三类变更完全不可区分。改为行侧**变更类别枚举**：`(无此行)`=该侧无此行 / `(空行)`=空行 / `(非空 N字节)`=非空行只报长度（敏感行仍前 2 后 1）——四态全覆盖、零原文、`10b` 反向断言可直接断。同长度改写两侧显示同串属设计内（diff 条目存在即证明变更，取值回仓库核对）。
+- **stale 注释（001-72 三.1）**：`scripts/patterns.mjs:6` 头注释改到与 v4.3 行为一致。
+- **`writeNoOverwrite` 转存序号上限（001-72 三.2 P2 观察 / 001-74.5 附议同批）**：EEXIST 循环加 seq 上限 1000，超限抛错请人工清理。
+- **路径口径（001-73 四 (a) / 001-74.4 附议）**：本机路径属**可回显元数据**（stdout / `latest.json` / `p0-alerts.jsonl` 可带），但**上板公开面只抄 `board-pending.md`、不抄 stdout 明细**——`renderBoard` 本就不用 `path`，selftest 场景 10e 断言「板首不含盘符/本机路径」把纪律钉死，不靠各家抄上板时手动挑的习惯兜。不改 basename（排障会丢信息）。
+- selftest 32 → **42 断言**（场景 10d/10d-5/10e），全绿；`report.version` → '4.4'。
+- **t-001 闭项**：diff 面（v4.3）+ version 面 + 行 diff 可读性三层闭环，`tasks.jsonl` 留痕；t-005（diffText LCS）维持 P2 观察项不绑死。
+
 ## 自测（共建时改前跑一遍、改后跑一遍）
 
 ```bash

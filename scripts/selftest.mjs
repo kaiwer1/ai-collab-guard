@@ -18,6 +18,18 @@
 //       （p0-alerts.jsonl / latest.json / board-pending.md / stdout / stderr）；同时仍进
 //       「原字节取证例外」区（state.json + evidence 副本）——取证能力不被反向断言削掉
 //   10c 例外区 gitignore 断言：reports/ 与 state.json 均在 .gitignore（001-67 口径①）
+// 场景10 续（v4.4，001-71/001-72/001-73/001-74 v4.3 复跑回执，t-001 闭项批次）：
+//   10d version 残余通道（001-73 二.3 探针发现 / 001-74 独立复核确认，P2）：version 曾是
+//       formatDiffValue 之外唯一仍回显原文的文件派生值——不命中模式的长串 version 原样进
+//       板首/stdout/latest.json/p0-alerts 的 version.to 与 dedupKey。断言：五个「不得含原文」
+//       产物零命中；version.to 显示 (未回显)；dedupKey version 段为 12 位哈希；原文仍进
+//       state.json（例外区）；正常版本号照旧可读（形态约束不放宽也不误伤）
+//   10d-5 行 diff '(空)' 哨兵回归（001-73 三判黄应修 / 001-74.3 附议）：v4.3 曾把 '(空)'
+//       哨兵吞成 (未回显)，markdown 口径清空/新增/改写三类变更不可区分。断言四态枚举
+//       （(无此行)/(空行)/(非空 N字节)）可区分且零原文
+//   10e 板首公开面干净（001-73 四 (a) / 001-74.4 附议）：本机路径属可回显元数据（stdout/
+//       latest.json 可带），但上板只抄 board-pending.md——断言板首不含盘符/本机路径，
+//       同时 stdout 确实带路径（口径不对称被钉死，不靠各家抄上板时手动挑的习惯兜）
 // 用法：node scripts/selftest.mjs（在仓库根目录运行；或 npm test）
 // 纪律：只在临时目录造夹具，不碰真实 registry 与被巡检文件。
 import { execFile } from 'node:child_process';
@@ -336,6 +348,93 @@ try {
   const giLines = gitignore10.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   check('场景10c 例外区 gitignore 断言（reports/ 与 state.json 均在 .gitignore）',
     giLines.includes('reports/') && giLines.includes('state.json'), gitignore10);
+
+  // 场景 10d（v4.4：001-73 二.3/二.4 version 残余通道探针发现 / 001-74 独立复核确认，P2）——
+  // version 曾是 formatDiffValue 之外唯一仍以原文回显的文件派生值：不命中模式的长串 version
+  // 会原样进板首/stdout/latest.json/p0-alerts.jsonl 的 version.to 与 dedupKey（note 被脱敏、
+  // version 全裸并存于同一行摘要）。v4.4 改为回显形态约束：形如常规版本号（^[\w.+-]{1,24}$）
+  // 且不命中敏感模式才原样回显，其余 '(未回显)'；dedupKeyOf version 段改 sha12 哈希。
+  const VERSION_LONG = '2.0.0-qxsk-8f3c2ab91d7e4f6a0b5c6d7e8f9012';
+  check('场景10d-0 长串 version 不命中任何敏感模式（反向断言前置）',
+    SENSITIVE_PATTERNS.every((p) => { p.re.lastIndex = 0; return !p.re.test(VERSION_LONG); }), VERSION_LONG);
+  // version 换成长串（内容同轮微调触发事件）：version.to 显示须受约束
+  await writeFile(roiPath, JSON.stringify({ version: VERSION_LONG, rules: { breakeven: 14.81 } }, null, 2));
+  const r10d0 = await run(registry);
+  check('场景10d-0b version 变更行显示受约束（1.0 → (未回显)）',
+    r10d0.stdout.includes('口径版本变更：测试ROI规则 1.0 → (未回显)') && !r10d0.stdout.includes(VERSION_LONG),
+    r10d0.stdout);
+  // 静默改口径：version 不变（长串）、内容变 → P0 事件 version.from=to=长串（v4.3 下全裸进产物）
+  await writeFile(roiPath, JSON.stringify({ version: VERSION_LONG, rules: { breakeven: 77.77 } }, null, 2));
+  const r10d = await run(registry);
+  const alerts10d = await readJsonl();
+  const latest10d = await readFile(join(tmp, 'reports', 'latest.json'), 'utf8');
+  const board10d = await readFile(join(tmp, 'reports', 'board-pending.md'), 'utf8');
+  const raw10d = scanForms(JSON.stringify(alerts10d)) + scanForms(r10d.stdout) + scanForms(r10d.stderr ?? '') + scanForms(latest10d) + scanForms(board10d);
+  const ev10d = alerts10d.find((e) => e.kind === '静默改口径' && e.status === 'pending' && e.version?.to === '(未回显)');
+  check('场景10d-1 长串 version 不进任何「不得含原文」产物（version 残余通道封住）',
+    !raw10d.includes(VERSION_LONG), raw10d.slice(0, 300));
+  check('场景10d-2 P0 事件 version.to 显示 (未回显) 且 dedupKey version 段为 12 位哈希不含原文',
+    !!ev10d && !ev10d.dedupKey.includes(VERSION_LONG) && /^[0-9a-f]{12}$/.test(ev10d.dedupKey.split('|')[2] ?? ''),
+    JSON.stringify(ev10d && { v: ev10d.version, k: ev10d.dedupKey }));
+  check('场景10d-3 原文仍进取证例外区（state.json，下轮对比基准）',
+    (await readFile(join(tmp, 'state.json'), 'utf8')).includes(VERSION_LONG), '');
+  // 正常版本号照旧可读：形态约束不放宽（仍无原文通道）也不误伤（2.1 原样显示）
+  await writeFile(roiPath, JSON.stringify({ version: '2.1', rules: { breakeven: 77.77 } }, null, 2));
+  const r10d4 = await run(registry);
+  check('场景10d-4 正常版本号照旧可读（(未回显) → 2.1）',
+    r10d4.stdout.includes('口径版本变更：测试ROI规则 (未回显) → 2.1') && !r10d4.stdout.includes(VERSION_LONG),
+    r10d4.stdout);
+
+  // 场景 10d-5（v4.4：001-73 三 行 diff '(空)' 哨兵回归判黄应修 / 001-74.3 附议）——
+  // v4.2 truncValue 曾让 '(空)' 原样保留；v4.3 改整体不回显后哨兵被一起吞掉，markdown 口径
+  // 「清空/新增/改写」三类变更完全不可区分。v4.4 行侧回显变更类别枚举（无正文回显）：
+  //   (无此行)=该侧无此行 / (空行)=空行 / (非空 N字节)=非空行只报长度（敏感行仍前 2 后 1）
+  const NONEMPTY = /^\(非空 \d+字节\)$/;
+  const p1Records = async () => {
+    try {
+      const t = await readFile(join(tmp, 'reports', 'p1-events.jsonl'), 'utf8');
+      return t.split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
+    } catch { return []; }
+  };
+  // 第一轮重新建立 markdown 基准（不依赖场景 4 遗留状态）
+  await writeFile(glossaryPath, '# 术语表\n\nA内容\n\nB内容\n');
+  await run(registry);
+  // 第二轮：行2 空→非空（改为非空）/ 行3 非空→空（改为空行）/ 行5 非空→非空（改写）/ 行7 新增
+  await writeFile(glossaryPath, '# 术语表\nX改\n\n\nC内容\n\n新增行内容\n');
+  await run(registry);
+  const p1r2 = (await p1Records()).filter((r) => r.name === '测试术语表').pop();
+  const d2 = p1r2?.diff ?? [];
+  // 类别层可区分（同长度改写 from/to 字符串相同属设计内——只报长度不报内容，行变更本身已证明内容变了）
+  const lineCat = (s) => s === '(无此行)' ? 'none' : s === '(空行)' ? 'blank' : (NONEMPTY.test(s) ? 'nonempty' : 'other');
+  const cats2 = d2.map((d) => `${lineCat(d.from)}->${lineCat(d.to)}`);
+  check('场景10d-5a 行 diff 四态可区分（改为非空/改为空行/改写/新增行各自不同类别）',
+    cats2.includes('blank->nonempty') && cats2.includes('nonempty->blank')
+    && cats2.includes('nonempty->nonempty') && cats2.includes('none->nonempty'),
+    JSON.stringify(d2));
+  check('场景10d-5b markdown 行 diff 不回显行原文', !JSON.stringify(d2).includes('A内容') && !JSON.stringify(d2).includes('新增行内容'), JSON.stringify(d2));
+  // 第三轮：删末行 → 行7 非空→(无此行)（删除行）
+  await writeFile(glossaryPath, '# 术语表\nX改\n\n\nC内容\n');
+  await run(registry);
+  const d3 = (await p1Records()).filter((r) => r.name === '测试术语表').pop()?.diff ?? [];
+  check('场景10d-5c 删除行形态（非空→(无此行)）', d3.some((d) => NONEMPTY.test(d.from) && d.to === '(无此行)'), JSON.stringify(d3));
+
+  // 场景 10e（v4.4：001-73 四 (a) / 001-74.4 附议）——本机路径属可回显元数据（stdout/latest.json
+  // 可带），但上板公开面只抄 board-pending.md、不抄 stdout 明细。用独立小 registry（记忆路径
+  // 缺失）演示不对称：stdout 带绝对路径，板首必须零路径；renderBoard 本就不用 path，现钉成断言。
+  const registry10e = join(tmp, 'registry-10e.json');
+  const goneMemPath = join(fixtures, 'no-such-memory.md');
+  await writeFile(registry10e, JSON.stringify({
+    version: 4,
+    root: tmp,
+    agents: [{ id: 'pathless', name: '路径缺失测试', memory: [goneMemPath] }],
+    caliber: [{ id: 'roi', name: '测试ROI规则', path: roiPath, watch: 'version', versionField: 'version' }],
+  }, null, 2));
+  const r10e = await run(registry10e);
+  const board10e = await readFile(join(tmp, 'reports', 'board-pending.md'), 'utf8');
+  check('场景10e 板首不含盘符/本机路径（上板只走 board-pending.md；stdout 可带路径）',
+    !/[A-Za-z]:[\\/]/.test(board10e) && !board10e.includes(tmp) && !board10e.includes(goneMemPath)
+    && r10e.stdout.includes(goneMemPath),
+    `板首含盘符=${/[A-Za-z]:[\\/]/.test(board10e)} 板首含tmp=${board10e.includes(tmp)} stdout含路径=${r10e.stdout.includes(goneMemPath)}`);
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }
