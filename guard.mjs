@@ -15,6 +15,14 @@
 //         匹配（改为断言占位替换）；词库文件（selfRef:true）diff 值整体脱敏（自指保护，改词库=可令告警失效）。
 //   字段级 diff：JSON 递归键路径，格式「键路径 | 旧值 → 新值 | version 旧 → 新」；非 JSON 按行号。
 //   状态机 CLI：--ack <id> --note "..." / --resolve <id> --note "..."（对应板上「已核对·结论」回执后人工执行）。
+// v4.1（2026-10-17 · workbuddy-step-5-preview，按留言板 001-55/001-56/001-57/001-58 首轮验证回执修复）：
+//   ① 红项（001-55 记红/001-56 认可）：敏感模式 8 类补至 13 类，与私有仓 AGENTS.md「提交前」
+//      密钥扫描词库一一对应（新增 LTAI/AKID/AIza/PEM 私钥块/ssh-rsa）——脱敏与检测同源，
+//      未命中模式的值会保留原文进产物；模式清单迁至 scripts/patterns.mjs（guard/selftest 共用）。
+//   ② 黄二（001-57 记黄/001-58 附议）：**每轮巡检对所有 pending 事件 rounds+1**，不只当轮
+//      candidate——一次性静默改动产生的 pending 没人回执也按 001-33 第 8 条置顶（原实现下永不置顶）。
+//   ③ 消费提示（001-55 第四节）：selfRef 词库文件跳过敏感扫描（secrets 为空），但自指变更独立走
+//      P0——消费侧按 kind 判定，不要按 secrets 非空筛选/路由。
 // 纪律：**只读**。不创建、不修改、不删除任何被巡检路径下的文件；只在本工具目录写 reports/ 与 state.json；
 //   p0-alerts.jsonl / board-pending.md 只由本工具生成，回执只能通过 --ack/--resolve 进行。
 // 用法：node guard.mjs [--json] [--full] [--registry <path>]
@@ -24,6 +32,7 @@ import { existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SENSITIVE_PATTERNS } from './scripts/patterns.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -46,20 +55,8 @@ const sha12 = (buf) => sha(buf).slice(0, 12);
 const now = () => new Date().toISOString();
 
 // ---------- 敏感键检测与脱敏（001-29 规格 + 003-42 三条可断言判据） ----------
+// 模式清单与私有仓 AGENTS.md 提交前扫描词库的对应关系见 scripts/patterns.mjs（v4.1 红项修复）。
 // 只报「命中类型」（键名/模式），从不输出原值；原值仅在本函数内部短暂存在。
-// 边界防误报（2026-10-17 实测教训：开发日志里 "ask-sonner" 被 sk- 误命中）：
-//   ① 词边界 lookbehind（key 前必须是行首/空白/引号/=/标点，不能是字母数字）；
-//   ② 最小长度（真实 key 的字符流通常 ≥16；短前缀如 sk-ws-/sk-sp- 只是类型名不是值）。
-const SENSITIVE_PATTERNS = [
-  { type: 'sk-', re: /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/g },
-  { type: 'ghp_', re: /(?<![A-Za-z0-9_-])ghp_[A-Za-z0-9]{20,}/g },
-  { type: 'github_pat_', re: /(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}/g },
-  { type: 'AKIA', re: /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}/g },
-  { type: 'xox', re: /(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}/g },
-  { type: 'bearer', re: /(?<![A-Za-z])Bearer\s+[A-Za-z0-9._-]{16,}/g },
-  { type: 'api-key', re: /(?:api[_-]?key|apikey)\s*[:=]\s*["']?([^\s"']{12,})/gi },
-  { type: 'token', re: /(?:token|secret|password|passwd|passphrase)\s*[:=]\s*["']?([^\s"']{12,})/gi },
-];
 // 返回去重后的命中类型列表（不返回原值——原值绝不出现在任何产物里）
 function scanSensitiveTypes(text) {
   const types = new Set();
@@ -360,12 +357,17 @@ function nextEventId(existing, tsIso) {
 }
 
 // 去重键=路径+内容哈希+version（001-29）：同 key pending 只续轮不新增；acked 不复发；resolved 后同 key 复发计新事件
+// v4.1（001-57 黄二 / 001-58 附议）：续轮范围=**所有 pending 事件**，不只当轮 candidate——
+// 原实现下一次性静默改动产生的 pending 没人回执就永不置顶（rounds 恒 1），与 001-33 第 8 条
+// 「同一 P0 连续 ≥2 轮未处理 → 置顶」原意相反，板首「待处理 N 轮」也会恒显 1（扭曲 #7 可读性）。
 function upsertAlerts(existing, candidates, tsIso) {
   const created = [];
   let touched = 0;
   const byKey = new Map(existing.map((e) => [e.dedupKey, e]));
+  const candidateKeys = new Set();
   for (const cand of candidates) {
     const key = dedupKeyOf(cand);
+    candidateKeys.add(key);
     const ex = byKey.get(key);
     if (ex && ex.status === 'pending') {
       ex.rounds += 1;
@@ -401,6 +403,14 @@ function upsertAlerts(existing, candidates, tsIso) {
     existing.push(ev);
     byKey.set(key, ev);
     created.push(ev);
+  }
+  // 每轮巡检：对所有 pending 事件续轮（当轮 candidate 已在上面处理过，不重复计数）
+  for (const e of existing) {
+    if (e.status !== 'pending' || candidateKeys.has(e.dedupKey)) continue;
+    e.rounds += 1;
+    e.updatedAt = tsIso;
+    e.escalated = e.rounds >= ESCALATE_AFTER;
+    touched += 1;
   }
   return { created, touched };
 }
@@ -540,7 +550,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
 
   const report = {
     tool: 'collab-guard',
-    version: 4,
+    version: '4.1',
     checkedAt: ts,
     root: registry.root,
     firstRun,
