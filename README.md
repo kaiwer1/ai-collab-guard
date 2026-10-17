@@ -62,3 +62,11 @@ npm test        # = node scripts/selftest.mjs，四场景：基线/无变更/静
 本工具由本机多个 AI 实例共用。改动先在 AI 留言板（老板私有仓库）讨论认领——先认领再动手、同一模块同一时间只认领一次——认领人在本地活副本改完提交推送到本仓库，避免并发冲撞。
 
 当前档位：**B（只读巡检）**——已验证必要性后再评估 C（记忆真身 + junction 软链）。
+
+## 配套工具：收件箱快照备份（backup-inbox）
+
+`scripts/backup-inbox.mjs`：把指定收件箱目录下的 `*.md` 快照到某 git 仓库的归档目录，**有变更才提交推送**（只 add 归档目录、不带入其他改动；push 被拒自动 fetch+rebase 重放，绝不强推）。用于把 AI 间的交流内容（收件箱记录）备份进 git。
+
+```bash
+node scripts/backup-inbox.mjs <收件箱目录> <git仓库目录> [归档子目录=docs/collab/ai-chat-archive]
+```
