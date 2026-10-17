@@ -11,6 +11,13 @@
 //   9b/9c --quarantine 搬移与 --unquarantine 回迁（只移动：原路径消失/恢复且字节一致）
 //   9d/9e 重复回迁被拒、原路径复现拒绝覆盖（绝不覆盖已存在目标）
 //   9f 限时保留只标记不删（超期条目标「待人工清理」，工具永不删文件）
+// 场景10（v4.3，001-67/001-68/001-69 ③ 首轮验证回执：P3 加固 + t-001 反向断言同批次）：
+//   10a P3 证据固化只写不覆盖：同事件 id 二次固化不改动既有副本（转存 <name>.<seq>，
+//       对称 9e 拒绝覆盖纪律），每条 evidence 台账 sha256 与磁盘字节恒等（台账自证）
+//   10b t-001 反向断言：未命中任何敏感模式的「不透明长值」原文不进任何「不得含原文」产物
+//       （p0-alerts.jsonl / latest.json / board-pending.md / stdout / stderr）；同时仍进
+//       「原字节取证例外」区（state.json + evidence 副本）——取证能力不被反向断言削掉
+//   10c 例外区 gitignore 断言：reports/ 与 state.json 均在 .gitignore（001-67 口径①）
 // 用法：node scripts/selftest.mjs（在仓库根目录运行；或 npm test）
 // 纪律：只在临时目录造夹具，不碰真实 registry 与被巡检文件。
 import { execFile } from 'node:child_process';
@@ -20,8 +27,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { SENSITIVE_PATTERNS, AGENTS_SCAN_VOCAB } from './patterns.mjs';
-import { loadLedger, appendLedger, RETAIN_DAYS } from './quarantine.mjs';
+import { loadLedger, appendLedger, saveEvidence, RETAIN_DAYS } from './quarantine.mjs';
 
 const execFileP = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -261,6 +269,73 @@ try {
     list9.stdout.includes('待人工清理') && list9.stdout.includes('lg-expired-fixture')
     && existsSync(roiPath) && existsSync(join(evDir9, 'roi.json')),
     list9.stdout);
+
+  // 场景 10（v4.3：001-67 P3 / 001-68 源码复核确认 / 001-69 附议 + t-001 反向断言，三家共识同批次）
+  // 10a：P3——同事件 id 二次固化只写不覆盖（转存 <name>.<seq>）：既有副本字节不变、meta 同步转存、
+  //      每条 evidence 台账 sha256 与磁盘字节恒等（与 9e「拒绝覆盖」对称的写入侧纪律，台账自证）
+  const sha256Hex = (s) => createHash('sha256').update(s).digest('hex');
+  const dupEv = { id: 'evt-selftest-dup', kind: '静默改口径', version: { to: '1.0' }, hash: { to: 'dup00' } };
+  await writeFile(roiPath, 'DUP-COPY-A');
+  const dupA = await saveEvidence(reportsDir, dupEv, roiPath);
+  await writeFile(roiPath, 'DUP-COPY-B');
+  const dupB = await saveEvidence(reportsDir, dupEv, roiPath);
+  const dupDir = join(reportsDir, 'evidence', dupEv.id);
+  const dupEntries = (await loadLedger(reportsDir)).filter((e) => e.action === 'evidence' && e.eventId === dupEv.id);
+  let dupLedgerOk = dupEntries.length === 2;
+  for (const e of dupEntries) {
+    try {
+      if (sha256Hex(await readFile(e.target, 'utf8')) !== e.sha256) dupLedgerOk = false;
+    } catch { dupLedgerOk = false; }
+  }
+  let dupDetail = '';
+  let dupOk = false;
+  try {
+    const copyA = await readFile(join(dupDir, 'roi.json'), 'utf8');
+    const copyB = await readFile(join(dupDir, 'roi.json.2'), 'utf8');
+    const metaA = JSON.parse(await readFile(join(dupDir, 'meta.json'), 'utf8'));
+    const metaB = JSON.parse(await readFile(join(dupDir, 'meta.json.2'), 'utf8'));
+    dupOk = dupA.target.endsWith('roi.json') && dupB.target.endsWith('roi.json.2')
+      && copyA === 'DUP-COPY-A' && copyB === 'DUP-COPY-B'
+      && metaA.sha256 === sha256Hex('DUP-COPY-A') && metaB.sha256 === sha256Hex('DUP-COPY-B')
+      && dupLedgerOk;
+    dupDetail = `copyA=${copyA} copyB=${copyB} 台账=${dupEntries.length} 条`;
+  } catch (e) {
+    dupDetail = String(e.message ?? e);
+  }
+  check('场景10a 二次固化不改既有副本（转存 .2）+ 台账 sha256 与磁盘恒等', dupOk, dupDetail);
+
+  // 10b：t-001 反向断言——未命中任何敏感模式的不透明长值：原文不进任何「不得含原文」产物
+  //      （001-55 修法③；「不得含原文」= p0-alerts.jsonl/board-pending.md/latest.json/stdout/stderr），
+  //      但仍进「原字节取证例外」区（state.json + evidence 副本）——取证能力不被反向断言削掉（001-67 口径）
+  const MARKER_OPAQUE = 'UNPATTERNED-MARKER-7f3d9q2w1x8z4y6b5n0m';
+  const markerHits = SENSITIVE_PATTERNS.filter((p) => { p.re.lastIndex = 0; return p.re.test(MARKER_OPAQUE); }).map((p) => p.type);
+  check('场景10b-0 夹具不命中任何敏感模式（反向断言前置）', markerHits.length === 0, markerHits.join('、'));
+  await writeFile(roiPath, JSON.stringify({ version: '1.0', rules: { breakeven: 14.81 }, note: `cfg ${MARKER_OPAQUE}` }, null, 2));
+  const r10 = await run(registry);
+  const alerts10 = await readJsonl();
+  const latest10 = await readFile(join(tmp, 'reports', 'latest.json'), 'utf8');
+  const board10 = await readFile(join(tmp, 'reports', 'board-pending.md'), 'utf8');
+  const raw10 = scanForms(JSON.stringify(alerts10)) + scanForms(r10.stdout) + scanForms(r10.stderr ?? '') + scanForms(latest10) + scanForms(board10);
+  check('场景10b-1 未命中模式的原文不进任何「不得含原文」产物（t-001 反向断言）',
+    !raw10.includes(MARKER_OPAQUE), raw10.slice(0, 300));
+  const state10 = await readFile(join(tmp, 'state.json'), 'utf8');
+  const ev10 = alerts10.filter((e) => e.kind === '静默改口径' && e.status === 'pending').pop();
+  let forensicsOk = false;
+  let forensicsDetail = '';
+  try {
+    const evCopy = await readFile(join(reportsDir, 'evidence', ev10.id, 'roi.json'), 'utf8');
+    forensicsOk = state10.includes(MARKER_OPAQUE) && evCopy.includes(MARKER_OPAQUE);
+    forensicsDetail = `state=${state10.includes(MARKER_OPAQUE)} evidence=${evCopy.includes(MARKER_OPAQUE)}`;
+  } catch (e) {
+    forensicsDetail = String(e.message ?? e);
+  }
+  check('场景10b-2 原值仍进取证例外区（state.json + evidence 副本，取证能力不削）', forensicsOk, forensicsDetail);
+
+  // 10c：例外区 gitignore 断言（001-67 口径①）——reports/ 与 state.json 必须入库即拒
+  const gitignore10 = await readFile(join(REPO, '.gitignore'), 'utf8');
+  const giLines = gitignore10.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  check('场景10c 例外区 gitignore 断言（reports/ 与 state.json 均在 .gitignore）',
+    giLines.includes('reports/') && giLines.includes('state.json'), gitignore10);
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }

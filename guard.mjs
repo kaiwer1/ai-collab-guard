@@ -23,6 +23,15 @@
 //      candidate——一次性静默改动产生的 pending 没人回执也按 001-33 第 8 条置顶（原实现下永不置顶）。
 //   ③ 消费提示（001-55 第四节）：selfRef 词库文件跳过敏感扫描（secrets 为空），但自指变更独立走
 //      P0——消费侧按 kind 判定，不要按 secrets 非空筛选/路由。
+// v4.3（2026-10-18 · workbuddy-step-5-preview，按 001-67/001-68/001-69 ③ 首轮验证回执）：
+//   ① P3（001-67 读码+探针发现 / 001-68 源码复核确认 / 001-69 附议）：saveEvidence 无条件
+//      writeFile 覆盖是全模块唯一「不拒绝覆盖」的写入点（同事件 id 二次固化静默替换首份副本、
+//      台账 sha256 与磁盘脱节）——scripts/quarantine.mjs 改「只写不覆盖」wx 标志 + 转存
+//      <name>.<seq>，台账 target 指向实际写入路径。
+//   ② t-001 反向断言（001-55 修法③，P1，001-65 认领；前置口径 001-67 第三节三家附议）：
+//      diff 非敏感值由 truncValue 保留原文改为整体 '(未回显)'——未命中任何敏感模式的值也不
+//      允许原文进 board-pending.md 等「不得含原文」产物（兜词汇表漂移的残余路径）；原文仍
+//      按 001-67 口径只进取证例外区（state.json / reports/evidence/** / reports/quarantine/**）。
 // ③（2026-10-18 · workbuddy-step-5-preview，按 001-23 候选工作项第 3 件 / 001-33 排期③首发）：
 //   备份/quarantine（scripts/quarantine.mjs，guard 与 CLI 共用单源）——只移动不删除 + 台账 jsonl + 限时保留。
 //   P0 事件创建即把被巡检文件原字节固化到 reports/evidence/<事件id>/（只读被巡检路径，只写本工具目录，
@@ -84,10 +93,6 @@ function maskValue(v) {
   const s = String(v);
   if (s.length <= 3) return '(脱敏)';
   return `${s.slice(0, 2)}…${s.slice(-1)}`;
-}
-function truncValue(v, max = 80) {
-  const s = String(v);
-  return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
 // ---------- 记忆巡检（v3 收窄：只报存在性/字节/行数，不做内容指纹） ----------
@@ -175,16 +180,22 @@ async function loadState() {
 }
 
 // ---------- 字段级 diff（001-28 格式：键路径 | 旧值 → 新值 | version 旧 → 新） ----------
-// 值策略：词库文件（selfRef）整体脱敏不回显；命中敏感模式 → 前 2 后 1；其余保留但截断 80 字符。
+// 值策略（v4.3，t-001 反向断言落地；001-55 修法③ + 001-67 第三节两类产物口径）：
+//   词库文件（selfRef）整体脱敏不回显；命中敏感模式 → 前 2 后 1（003-42 判据2）；
+//   **其余值一律不回显原文（'(未回显)'）**——兜「AGENTS.md 日后新增第六类凭据而两份清单
+//   同时未覆盖」的残余路径：未命中模式的值原先走 truncValue 保留原文进 diff→summary→
+//   board-pending.md（003-42 红项根因链的最后一环）。阈值/字段改了由键路径 + version
+//   迁移 + 哈希变化足以定位，具体取值回仓库核对（原文只进 state.json 与 evidence 取证区）。
+function formatDiffValue(v, selfRef) {
+  if (selfRef) return '(脱敏)'; // 自指保护优先：词库内容一律不回显
+  if (v === undefined || v === null) return '(空)';
+  if (typeof v === 'object') return Array.isArray(v) ? '[数组]' : '[对象]';
+  const s = String(v);
+  if (isSensitiveValue(s)) return maskValue(s);
+  return '(未回显)';
+}
 function makeValueFormatter(selfRef) {
-  return (v) => {
-    if (selfRef) return '(脱敏)'; // 自指保护优先：词库内容一律不回显
-    if (v === undefined || v === null) return '(空)';
-    if (typeof v === 'object') return Array.isArray(v) ? '[数组]' : '[对象]';
-    const s = String(v);
-    if (isSensitiveValue(s)) return maskValue(s);
-    return truncValue(s);
-  };
+  return (v) => formatDiffValue(v, selfRef);
 }
 
 function diffJson(a, b, prefix, out, fmt) {
@@ -239,9 +250,9 @@ function caliberDiff(prev, curr) {
   } else {
     const raw = diffText(prev.text, curr.text);
     for (const d of raw) {
-      const from = curr.selfRef ? '(脱敏)' : (isSensitiveValue(d.from) ? maskValue(d.from) : truncValue(d.from));
-      const to = curr.selfRef ? '(脱敏)' : (isSensitiveValue(d.to) ? maskValue(d.to) : truncValue(d.to));
-      out.push({ key: d.key, from, to });
+      // 非 JSON 按行 diff：行值同样不回显原文（'(未回显)'），空行两侧保留 '(空)'
+      const line = (v) => (v === undefined || v === null ? '(空)' : formatDiffValue(v, curr.selfRef));
+      out.push({ key: d.key, from: line(d.from), to: line(d.to) });
     }
   }
   return out.slice(0, MAX_DIFF_ITEMS);
@@ -570,7 +581,7 @@ if (ackIdx >= 0 || resolveIdx >= 0) {
 
   const report = {
     tool: 'collab-guard',
-    version: '4.2',
+    version: '4.3',
     checkedAt: ts,
     root: registry.root,
     firstRun,

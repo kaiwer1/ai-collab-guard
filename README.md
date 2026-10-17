@@ -18,7 +18,7 @@
 | --- | --- |
 | `guard.mjs` | 巡检主程序（node ≥ 16，ESM） |
 | `scripts/patterns.mjs` | 敏感键模式清单 + AGENTS.md 扫描词库镜像（guard 与 selftest 共用，v4.1 迁出防漂移） |
-| `scripts/selftest.mjs` | 自测（npm test，九场景） |
+| `scripts/selftest.mjs` | 自测（npm test，十场景） |
 | `scripts/quarantine.mjs` | ③ 备份/quarantine（guard 与 CLI 共用单源：证据固化 / 搬移 / 回迁 / 台账 / 限时保留，见下文） |
 | `scripts/backup-inbox.mjs` | 收件箱快照备份（见文末） |
 | `registry.json` | 登记表（真实路径，**不入库**，从模板复制改写） |
@@ -91,10 +91,19 @@ node scripts/quarantine.mjs --list [--registry <path>]              # 台账总�
 
 > ⚠️ `reports/evidence/` 与 `reports/quarantine/` **含被巡检文件原字节、可能带敏感键原值**（同 `state.json`）——严禁入库 / 同步 / 外发（reports/ 整体 gitignore）。
 
+## v4.3 修订（2026-10-18 · 001-67/001-68/001-69 ③ 首轮验证回执：P3 加固 + t-001 反向断言）
+
+③ 首发三家验证齐（QwenWork 001-67 一手复跑 27/27 + ZCode 001-68 独立复跑 27/27 + Doubao 001-66 认账，GLM5.3Flash 001-69 附议放行）；本批按回执「修复或收官」处理两条非阻塞项：
+
+- **P3 加固（001-67 读码 + 探针实测 / 001-68 源码复核确认）**：`saveEvidence` 曾是无条件 `writeFile` 覆盖——全模块唯一不做「拒绝覆盖」的写入点（与搬移/回迁的 `existsSync` 纪律不对称）。同事件 id 二次固化会静默替换首份副本，且首条 evidence 台账 sha256 与磁盘脱节（台账自证失效）。改为**只写不覆盖**：`wx` 标志 + 已存在转存 `<name>.<seq>`（meta.json 同规则），台账 `target` 指向实际写入路径；selftest 场景 10a 对称断言「重复固化不改既有副本、台账 sha256 与磁盘恒等」。
+- **t-001 反向断言（001-55 修法③，P1；前置口径 001-67 第三节三家附议）**：未命中任何敏感模式的值也不允许原文进告警产物——diff 值策略改为：selfRef → `(脱敏)`；命中敏感模式 → 前 2 后 1；**其余一律 `(未回显)`**（原 truncValue 保留原文是 003-42 红项根因链的最后一环，兜「词库日后新增第六类凭据而两份清单同时未覆盖」）。阈值/字段改了由键路径 + version 迁移 + 哈希变化足以定位，具体取值回仓库核对。
+- **产物两类清单（001-67 口径，断言常量在 selftest 场景 10）**：**不得含原文** = `reports/p0-alerts.jsonl` / `reports/board-pending.md` / `reports/latest.json` / stdout / stderr；**原字节取证例外** = `state.json` / `reports/evidence/**` / `reports/quarantine/**` / `reports/quarantine-ledger.jsonl` 的 `path`/`target` 字段（路径非原文，但同属本机目录信息，只留 gitignore 区内）。反向断言**不**把例外目录静默移出扫描面，而是：① 断言 `reports/` 与 `state.json` 在 `.gitignore`（10c）；② 断言夹具原值不进任何「不得含原文」产物、同时仍进取证例外区（10b——取证能力不被反向断言削掉，两者不互相打架）。
+- selftest 27 → **32 断言**（场景 10a/10b-0/10b-1/10b-2/10c），全绿；`report.version` → '4.3'。
+
 ## 自测（共建时改前跑一遍、改后跑一遍）
 
 ```bash
-npm test        # = node scripts/selftest.mjs，九场景：基线/无变更/静默改口径告警/正规升版本/敏感键误写脱敏/去重+升级置顶+ack/词库自指/词库对齐+短值+全词项/③备份quarantine全链路
+npm test        # = node scripts/selftest.mjs，十场景：基线/无变更/静默改口径告警/正规升版本/敏感键误写脱敏/去重+升级置顶+ack/词库自指/词库对齐+短值+全词项/③备份quarantine全链路/证据不覆盖+反向断言+gitignore
 ```
 
 自测只在临时目录造夹具，不碰真实 `registry.json` 与被巡检文件；退出码 0 = 全过。
@@ -107,6 +116,8 @@ npm test        # = node scripts/selftest.mjs，九场景：基线/无变更/静
   - `watch: "content"`——无版本字段的文档：内容变更 = 记录级事件；
   - `watch: "exists"`——只盯存在性（如持续增长的开发日志）。
   - **同一文件不要登记两条 caliber**（dedupKey 用裸路径串，两条目会共享去重键互相覆盖轮次——GLM5.3Flash 001-56 建议）。
+
+> 豆包（Doubao）没有单文件长期记忆，`registry.json` 中如实留空（`memory: []`）——巡检输出「未登记记忆：豆包」是**如实状态而非故障**，见 `registry.example.json` note（Doubao 001-62 / GLM5.3Flash 001-64 建议的消歧）。
 
 ## 纪律（不可破）
 

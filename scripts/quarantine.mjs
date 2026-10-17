@@ -1,4 +1,7 @@
 // ③ 备份 / quarantine 机制（留言板 001-23 候选工作项第 3 件；001-33 定稿排期③首发，2026-10-18）
+// v4.3（2026-10-18 · workbuddy-step-5-preview，001-67 P3 / 001-68 源码复核确认 / 001-69 附议）：
+//   证据固化由无条件覆盖改为「只写不覆盖」——目标已存在则转存 <name>.<seq>，与搬移/回迁
+//   的拒绝覆盖纪律对称（同事件 id 二次固化不改动既有副本；台账 sha256 与磁盘恒等）。
 // 规则（001-23 原文）：**只移动不删除 + 台账 jsonl + 限时保留**——服务「发现异常后有据可查」。
 //  - 备份：P0 告警事件创建时，guard 自动把被巡检口径文件的原字节固化为
 //    reports/evidence/<事件id>/ 副本（只读被巡检路径，只写本工具目录——不破坏 guard 只读纪律）；
@@ -75,13 +78,33 @@ async function moveFile(src, dst) {
   }
 }
 
+// ③ v4.3（001-67 P3 / 001-68 源码复核确认）：saveEvidence 曾用无条件 writeFile 覆盖——
+// 全模块唯一不做「拒绝覆盖」的写入点，与搬移 :129/回迁 :157 的 existsSync 纪律不对称。
+// 同事件 id 二次固化会静默替换首份副本（旧字节不可恢复），且首条 evidence 台账 sha256
+// 与磁盘脱节（台账自证失效）。改为只写不覆盖 + 已存在转存 <name>.<seq>。
+// 只写不覆盖（与搬移/回迁「绝不覆盖已存在目标」纪律对称）：wx 标志保证存在即 EEXIST，
+// 转存序列在此之上防竞态；永不覆盖、永不删除（只移动不删除纪律）。
+async function writeNoOverwrite(target, data) {
+  const dir = dirname(target);
+  const name = basename(target);
+  for (let seq = 1; ; seq += 1) {
+    const candidate = seq === 1 ? target : join(dir, `${name}.${seq}`);
+    try {
+      await writeFile(candidate, data, { flag: 'wx' });
+      return candidate;
+    } catch (e) {
+      if (e && e.code === 'EEXIST') continue; // 转存下一序号，绝不覆盖既有副本
+      throw e;
+    }
+  }
+}
+
 // ---------- 备份：P0 事件创建即固化证据副本（guard 巡检内自动调用） ----------
 export async function saveEvidence(reportDir, ev, absPath) {
   const buf = await readFile(absPath);
   const dir = evidenceDirOf(reportDir, ev.id);
   await mkdir(dir, { recursive: true });
-  const target = join(dir, basename(absPath));
-  await writeFile(target, buf);
+  const target = await writeNoOverwrite(join(dir, basename(absPath)), buf);
   const ts = nowIso();
   const meta = {
     eventId: ev.id,
@@ -96,7 +119,7 @@ export async function saveEvidence(reportDir, ev, absPath) {
     savedAt: ts,
     note: 'P0 告警创建时的原字节固化副本（③备份，001-23/001-33）；只读被巡检路径写入，未修改原文件',
   };
-  await writeFile(join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+  await writeNoOverwrite(join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
   const entry = {
     id: nextLedgerId(await loadLedger(reportDir), ts),
     ts,
