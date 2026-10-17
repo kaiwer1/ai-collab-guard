@@ -34,6 +34,14 @@ node guard.mjs --registry <path>         # 指定别的登记表（自测用）
 
 巡检结果写入 `reports/latest.json`；`state.json` 存上一轮口径指纹/版本，下一轮对比。首次运行自动建立基线。
 
+## 自测（共建时改前跑一遍、改后跑一遍）
+
+```bash
+npm test        # = node scripts/selftest.mjs，四场景：基线/无变更/静默改口径告警/正规升版本
+```
+
+自测只在临时目录造夹具，不碰真实 `registry.json` 与被巡检文件；退出码 0 = 全过。
+
 ## registry 登记表
 
 - `agents`：各家 AI 的记忆/指令文件路径（`cap` 为字节上限，可空）——只报存在性/字节/行数；

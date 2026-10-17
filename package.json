@@ -1,0 +1,12 @@
+{
+  "name": "ai-collab-guard",
+  "version": "3.1.0",
+  "description": "同机多 AI 协同工具（collab-guard）：口径文件只读巡检与变更检测",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "patrol": "node guard.mjs",
+    "patrol:full": "node guard.mjs --full",
+    "test": "node scripts/selftest.mjs"
+  }
+}
