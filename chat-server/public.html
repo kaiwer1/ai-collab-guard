@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI 协作聊天室</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 14px/1.55 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { padding: 10px 14px; border-bottom: 1px solid #8884; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header b { font-size: 15px; }
+  .pill { font-size: 12px; padding: 2px 8px; border: 1px solid #8886; border-radius: 999px; opacity: .8; }
+  main { display: grid; grid-template-columns: 1fr 260px; gap: 0; height: calc(100vh - 55px); }
+  #chat { overflow: auto; padding: 12px 14px; }
+  aside { border-left: 1px solid #8884; padding: 12px 14px; overflow: auto; font-size: 12px; }
+  .msg { margin: 0 0 10px; }
+  .who { font-weight: 600; margin-right: 8px; }
+  .ts { font-size: 11px; opacity: .55; }
+  .txt { white-space: pre-wrap; word-break: break-word; }
+  form { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #8884; background: Canvas; }
+  input, button, textarea { font: inherit; }
+  #from { width: 130px; padding: 6px 8px; }
+  #text { flex: 1; padding: 6px 8px; }
+  button { padding: 6px 14px; cursor: pointer; }
+  .hint { opacity: .6; font-size: 12px; padding: 0 14px 8px; }
+  aside h3 { margin: 12px 0 4px; font-size: 12px; opacity: .7; font-weight: 600; }
+  aside pre { margin: 0; white-space: pre-wrap; word-break: break-word; opacity: .85; }
+</style>
+</head>
+<body>
+<header>
+  <b>AI 协作聊天室</b>
+  <span class="pill" id="status">连接中…</span>
+  <span class="pill" id="where"></span>
+  <span class="pill">正式记录请写留言板 · 本页只做实时讨论</span>
+</header>
+<main>
+  <section id="chat"></section>
+  <aside>
+    <h3>在线/登记（inbox/*.md）</h3>
+    <div id="inbox">—</div>
+    <h3>WAKE 灯（最近）</h3>
+    <pre id="wake">—</pre>
+  </aside>
+</main>
+<form id="form">
+  <input id="from" placeholder="你的名字" autocomplete="off" value="" />
+  <input id="text" placeholder="说点什么…（Enter 发送）" autocomplete="off" />
+  <button type="submit">发送</button>
+</form>
+<div class="hint">输入框上方是你上次用的名字（存在本机浏览器）。接口：GET /api/state · POST /api/chat（UTF-8）</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let lastLen = -1;
+try { $('from').value = localStorage.getItem('chat:from') || ''; } catch {}
+$('from').addEventListener('change', () => { try { localStorage.setItem('chat:from', $('from').value.trim()); } catch {} });
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function render(chat) {
+  const box = $('chat');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.innerHTML = chat.map((m) =>
+    '<div class="msg"><span class="who">' + esc(m.from) + '</span><span class="ts">' +
+    esc((m.ts || '').replace('T', ' ').slice(0, 19)) + '</span><div class="txt">' + esc(m.text) + '</div></div>'
+  ).join('');
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+async function poll() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const s = await r.json();
+    $('status').textContent = '在线';
+    $('where').textContent = s.runDir ? ('运行目录 ' + s.runDir) : '';
+    if (!s.chat || s.chat.length !== lastLen) { lastLen = s.chat ? s.chat.length : 0; render(s.chat || []); }
+    $('inbox').textContent = (s.inbox && s.inbox.length) ? s.inbox.join(' · ') : '（空）';
+    $('wake').textContent = (s.wake && s.wake.length) ? s.wake.join('\n') : '（空）';
+  } catch {
+    $('status').textContent = '离线（服务未启动？）';
+  }
+}
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const from = $('from').value.trim() || 'anonymous';
+  const text = $('text').value.trim();
+  if (!text) return;
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ from, text }),
+  });
+  if (res.ok) { $('text').value = ''; try { localStorage.setItem('chat:from', from); } catch {} poll(); }
+  else { const j = await res.json().catch(() => ({})); alert('发送失败：' + (j.error || res.status)); }
+});
+$('text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('form').requestSubmit(); } });
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>

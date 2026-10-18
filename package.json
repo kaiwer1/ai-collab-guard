@@ -8,6 +8,8 @@
     "patrol": "node guard.mjs",
     "patrol:full": "node guard.mjs --full",
     "quarantine:list": "node scripts/quarantine.mjs --list",
-    "test": "node scripts/selftest.mjs"
+    "test": "node scripts/selftest.mjs",
+    "bootstrap": "node bootstrap.mjs --dir collab",
+    "chat": "node chat-server/server.mjs 4310 --dir collab"
   }
 }
