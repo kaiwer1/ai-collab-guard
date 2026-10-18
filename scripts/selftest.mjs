@@ -421,8 +421,10 @@ try {
   // 场景 10f（v4.5：Codex 001-80 边界复核）——safeVersion 收窄为「版本结构语义」：
   // 长度+字符集不足以表达版本号（20 字符 MockOpaqueValue123456 同样满足 ^[\w.+-]{1,24}$）。
   // 承诺口径：含「数字.数字」核心（0.49.12 / v1.0.0 / 1.0.0-beta.1 / 1.2.3+build.…
-  // / copy-compliance-2026.10.15-v1）原样回显；裸数字、无点结构不透明串、换行一律 (未回显)；
-  // 长度 ≤24；state.json 取证例外保留原文。Codex 点名夹具：正常版本/短不透明串/24 边界/异常分隔。
+  // ）且 ≤24 字符才原样回显；裸数字、无点结构不透明串、换行一律 (未回显)；state.json 取证
+  // 例外保留原文。Codex 点名夹具：正常版本/短不透明串/24 边界/异常分隔。
+  // v4.6（001-85 P3 假承诺订正）：copy-compliance-2026.10.15-v1 实为 29 字符 slug，长度闸
+  // 即掩码（v4.5 注释曾误列入回显清单）——10f-7 用真实 configs/文案合规-v1.0.json 串钉死。
   const p1Last = async () => (await p1Records()).filter((r) => r.name === '测试ROI规则').pop();
   const V_NORMAL = '0.49.12';
   const V_OPAQUE_SHORT = 'MockOpaque123';            // 12 字符无版本核心 → 不回显
@@ -430,6 +432,7 @@ try {
   const V_BOUNDARY_OK = '1.2.3+build.20261018.123';   // 恰 24 字符、有核心 → 回显
   const V_BOUNDARY_OVER = '1.2.3+build.20261018.1234'; // 25 字符 → 不回显
   const V_WEIRD = '1.0\nsk-x';                        // 换行不在字符集 → 不回显
+  const V_SLUG_LONG = 'copy-compliance-2026.10.15-v1'; // 29 字符 slug>上限（真实 configs/文案合规-v1.0.json 实例）→ 不回显
   const step10f = async (v, content) => {
     await writeFile(roiPath, JSON.stringify({ version: v, rules: content }, null, 2));
     const r = await run(registry);
@@ -467,6 +470,13 @@ try {
   const roiState10f = state10f.caliber.find((c) => c.id === 'roi');
   check('场景10f-6 不回显的 version 原文仍保留在 state.json（取证例外不削）',
     roiState10f?.version === V_OPAQUE_LONG && f7.p1?.version?.to === '(未回显)', JSON.stringify(roiState10f?.version));
+  // 10f-7 超长 slug version 掩码（v4.6：001-85 P3 假承诺订正——真实 config 实例，长度闸独立于核心闸）
+  const f8 = await step10f(V_SLUG_LONG, { breakeven: 14.88 });
+  const latest10f7 = JSON.parse(await readFile(join(tmp, 'reports', 'latest.json'), 'utf8'));
+  check('场景10f-7 超24字符slug version 掩码为(未回显)（真实 configs/文案合规-v1.0.json 实例）',
+    f8.p1?.version?.to === '(未回显)' && !f8.r.stdout.includes(V_SLUG_LONG)
+    && latest10f7.caliber.units.find((u) => u.id === 'roi').version === '(未回显)',
+    f8.p1?.version?.to);
 
   // 场景 10e（v4.4：001-73 四 (a) / 001-74.4 附议）——本机路径属可回显元数据（stdout/latest.json
   // 可带），但上板公开面只抄 board-pending.md、不抄 stdout 明细。用独立小 registry（记忆路径
